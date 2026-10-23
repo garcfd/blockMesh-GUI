@@ -1,0 +1,25 @@
+{
+  "origin": [
+    -2.4,
+    -0.72,
+    -1.14
+  ],
+  "spacing": [
+    0.02,
+    0.019743589743589744,
+    0.019999999999999997
+  ],
+  "shape_xyz": [
+    241,
+    79,
+    115
+  ],
+  "source": "car_simplified.stl",
+  "method": "exact signed distance to STL triangles in a 8 cm band, ramped beyond",
+  "band_cm": 8.0,
+  "stride": 3,
+  "band_nodes": 646700,
+  "total_nodes": 2189485,
+  "ramped": true,
+  "dtype": "float32"
+}

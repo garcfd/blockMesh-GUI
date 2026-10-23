@@ -1,0 +1,2542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blocksplit — car blockMesh</title>
+<style>
+  :root{
+    --bg:#14161b; --panel:#1d2129; --panel2:#232936; --line:#2e3542;
+    --txt:#d7dce4; --dim:#8b93a3; --acc:#4da3ff; --acc2:#2b6cb0;
+    --ok:#3fd68c; --warn:#ffcf5c; --bad:#ff6b6b;
+    --rx:#ff6b6b; --ry:#3fd68c; --rz:#4da3ff;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:13px/1.45 "Segoe UI",system-ui,Roboto,Arial,sans-serif;
+       display:flex;flex-direction:column;overflow:hidden}
+  header{display:flex;align-items:center;gap:10px;padding:8px 14px;
+         background:var(--panel);border-bottom:1px solid var(--line)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .sub{color:var(--dim);font-size:12px}
+  header .ver{font-size:11px;color:#0c0f14;background:var(--ok);border-radius:5px;
+              padding:1px 7px;font-weight:700}
+  header .sp{flex:1}
+  .vbtn{background:var(--panel2);color:var(--txt);border:1px solid var(--line);
+        border-radius:6px;padding:5px 10px;cursor:pointer;font-size:12px}
+  .vbtn.on{border-color:var(--acc);color:#fff;background:rgba(215,120,60,.25)}
+  .vbtn:hover{border-color:var(--acc);color:#fff}
+  #main{flex:1;display:flex;min-height:0}
+  aside{width:322px;min-width:322px;background:var(--panel);
+        border-right:1px solid var(--line);overflow-y:auto;padding:12px}
+  aside h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;
+           color:var(--dim);margin:14px 0 8px}
+  aside h2:first-child{margin-top:0}
+  #view{flex:1;position:relative;min-width:0;min-height:480px}
+  #c{position:absolute;inset:0;display:block}
+  #glstat{position:absolute;left:10px;top:8px;color:var(--warn);font-size:11.5px;
+        background:rgba(20,22,27,.8);padding:4px 8px;border-radius:6px;
+        border:1px solid var(--line);pointer-events:none;max-width:60%}
+  #pickinfo{position:absolute;left:10px;top:34px;color:var(--txt);font-size:11.5px;
+        font-family:ui-monospace,Consolas,monospace;
+        background:rgba(20,22,27,.8);padding:4px 8px;border-radius:6px;
+        border:1px solid var(--line);pointer-events:none;max-width:70%;
+        white-space:pre;line-height:1.5}
+  #pickinfo b{color:#ffd15c}
+  #pickinfo i{color:var(--dim);font-style:normal}
+  #hint{position:absolute;left:10px;bottom:8px;color:var(--dim);font-size:11.5px;
+        background:rgba(20,22,27,.72);padding:4px 8px;border-radius:6px;
+        border:1px solid var(--line);pointer-events:none}
+  #winrect{position:absolute;display:none;border:1px solid var(--acc);
+        background:rgba(77,163,255,.16);pointer-events:none;z-index:6;
+        border-radius:3px}
+  #winrect.out{border:1px dashed var(--ok);background:rgba(63,214,140,.14)}
+  body.zoomband #view{cursor:crosshair}
+  .seg{display:flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{flex:1;background:transparent;color:var(--dim);border:0;
+              padding:7px 0;cursor:pointer;font-size:13px;font-weight:600}
+  .seg button.onX{background:rgba(255,107,107,.18);color:var(--rx)}
+  .seg button.onY{background:rgba(63,214,140,.16);color:var(--ry)}
+  .seg button.onZ{background:rgba(77,163,255,.18);color:var(--rz)}
+  .seg button.onA{background:rgba(215,220,228,.14);color:#fff}
+  .seg button.onN{background:rgba(215,220,228,.14);color:#fff}
+  .seg button.onI{background:rgba(255,107,107,.18);color:var(--rx)}
+  .seg button.onO{background:rgba(63,214,140,.16);color:var(--ry)}
+  .row{display:flex;align-items:center;gap:8px;padding:4px 0;
+       border-bottom:1px solid #222836}
+  .row .lab{width:64px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .row input[type=number]{flex:1;min-width:0;}
+  .row select{flex:1;min-width:0;background:#12151c;color:var(--txt);
+    border:1px solid var(--line);border-radius:6px;padding:5px;}
+  .row .btn{width:auto;white-space:nowrap;}
+  .xbtn{background:#2a1114;color:var(--bad);border:1px solid #5a2228;
+        border-radius:6px;width:26px;height:24px;cursor:pointer;font-size:13px;line-height:1}
+  .xbtn:hover{background:#3d1519}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  label.fl{display:flex;flex-direction:column;font-size:11px;color:var(--dim);gap:3px}
+  input[type=number],input[type=text]{background:#12151c;color:var(--txt);
+    border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+  .btn{background:var(--acc2);color:#fff;border:0;border-radius:7px;
+       padding:7px 10px;cursor:pointer;font-size:12.5px;font-weight:600;width:100%}
+  .btn:hover{filter:brightness(1.15)}
+  .btn.busy{background:var(--ok);color:#04140a;pointer-events:none;opacity:.85}
+  .btn.running{background:var(--ok);color:#04140a;font-weight:600}
+  #optlog{display:none;margin:6px 0;padding:6px;max-height:190px;overflow:auto;white-space:pre-wrap;
+          font:11px/1.45 Consolas,monospace;background:var(--panel2);border:1px solid var(--line);border-radius:7px}
+  .btn.ghost{background:var(--panel2);border:1px solid var(--line);font-weight:400}
+  .btn.danger{background:#5a2228}
+  .btnrow{display:flex;gap:6px;margin-top:6px}
+  .btnrow .btn{width:auto;flex:1}
+  #selcard{background:var(--panel2);border:1px solid var(--acc);
+           border-radius:8px;padding:8px;margin-top:6px}
+  #selcard.none{border-color:var(--line)}
+  #log{background:#0e1014;border:1px solid var(--line);border-radius:8px;
+       padding:8px;white-space:pre-wrap;font:11px/1.5 Consolas,monospace;
+       max-height:220px;overflow-y:auto;color:#b9c2d0}
+  .stat{color:var(--ok)}
+  .chk{display:flex;gap:8px;align-items:center;margin:4px 0;color:var(--txt)}
+  .chk input{accent-color:var(--acc)}
+  a.dl{color:var(--acc)}
+  .mut{color:var(--dim);font-size:11.5px}
+  .dsl{position:relative;height:24px;margin:2px 0}
+  .dsl input[type=range]{position:absolute;left:0;top:0;width:100%;margin:0;
+    pointer-events:none;background:transparent;-webkit-appearance:none;appearance:none}
+  .dsl input[type=range]::-webkit-slider-runnable-track{background:#2e3542;height:4px;border-radius:2px}
+  .dsl input[type=range]::-webkit-slider-thumb{pointer-events:auto;-webkit-appearance:none;
+    width:14px;height:14px;border-radius:50%;background:var(--acc);margin-top:-5px;cursor:pointer}
+  .dsl input[type=range]::-moz-range-track{background:#2e3542;height:4px;border-radius:2px}
+  .dsl input[type=range]::-moz-range-thumb{pointer-events:auto;width:14px;height:14px;
+    border:0;border-radius:50%;background:var(--acc);cursor:pointer}
+</style>
+<script src="/vendor/three.min.js"></script>
+<script src="/vendor/OrbitControls.js"></script>
+</head>
+<body>
+<header>
+  <h1>Blocksplit</h1><span class="ver">v8</span>
+  <span class="sub">car blockMesh · structured · no snappy</span>
+  <span class="sp"></span>
+  <button class="vbtn" id="pivotbtn" title="Click a point on the car to set the orbit rotation centre">Set pivot</button>
+  <button class="vbtn" data-view="iso">Iso</button>
+  <button class="vbtn" data-view="front">Front</button>
+  <button class="vbtn" data-view="side">Side</button>
+  <button class="vbtn" data-view="top">Top</button>
+  <button class="vbtn" id="projmode" title="Toggle perspective / orthographic camera">Ortho</button>
+  <button class="vbtn" id="winbtn" title="Zoom window: press then drag a box. Left-to-right zooms in to the box; right-to-left zooms out (view shrinks into the box).">Zoom win</button>
+</header>
+<div id="main">
+<aside>
+  <div class="btnrow"><button class="btn" id="readbtn">Read blockMeshDict</button></div>
+  <h2 id="domhead" style="cursor:pointer;user-select:none">DOMAIN &#9656;</h2>
+  <div id="domwrap" style="display:none">
+  <div class="row"><span class="lab">X</span><input type="number" id="dxmin" step="0.5" value="-8"><input type="number" id="dxmax" step="0.5" value="12"></div>
+  <div class="row"><span class="lab">Y</span><input type="number" id="dymin" step="0.05" value="-0.59"><input type="number" id="dymax" step="0.5" value="4"></div>
+  <div class="row"><span class="lab">Z</span><input type="number" id="dzmin" step="0.5" value="-4"><input type="number" id="dzmax" step="0.5" value="4"></div>
+  <div class="btnrow"><button class="btn" id="domapply">Apply domain</button></div>
+  </div>
+  <h2 id="splithead" style="cursor:pointer;user-select:none">SPLITS &#9656;</h2>
+  <div id="splitwrap" style="display:none">
+  <div class="seg" id="modeseg">
+    <button data-m="x">X</button><button data-m="y">Y</button>
+    <button data-m="z">Z</button><button data-m="all">All</button>
+  </div>
+  <div class="grid2" style="margin-top:8px">
+    <label class="fl">Split value<input type="number" id="newval" step="0.05" value="0"></label>
+    <label class="fl">Opacity<input type="number" id="opac" step="0.01" min="0.03" max="0.6" value="0.3"></label>
+  </div>
+  <div class="btnrow">
+    <button class="btn" id="addbtn">Add split</button>
+    <button class="btn ghost" id="modsplitbtn">Modify split</button>
+  </div>
+  </div>
+  <h2 id="blockhead" style="cursor:pointer;user-select:none">BLOCKS &#9656;</h2>
+  <div id="blockwrap" style="display:none">
+  <div class="btnrow"><button class="btn" id="modbtn">Modify block</button></div>
+  <div class="row"><span class="lab" style="width:auto">nx</span><input type="number" id="bnx" step="1" min="1" max="200"><span class="lab" style="width:auto">ny</span><input type="number" id="bny" step="1" min="1" max="200"><span class="lab" style="width:auto">nz</span><input type="number" id="bnz" step="1" min="1" max="200"></div>
+  <div id="blksel" class="mut"></div>
+  <div class="mut" id="rlabi">i</div>
+  <div class="dsl"><input type="range" id="ri0" step="1"><input type="range" id="ri1" step="1"></div>
+  <div class="mut" id="rlabj">j</div>
+  <div class="dsl"><input type="range" id="rj0" step="1"><input type="range" id="rj1" step="1"></div>
+  <div class="mut" id="rlabk">k</div>
+  <div class="dsl"><input type="range" id="rk0" step="1"><input type="range" id="rk1" step="1"></div>
+  <div class="seg" id="showseg">
+    <button data-s="range">range only</button><button data-s="dead">dead only</button><button data-s="live">live only</button>
+  </div>
+  <div class="btnrow"><button class="btn ghost" id="livebtn">LIVE</button><button class="btn ghost" id="deadbtn">DEAD</button></div>
+  </div>
+  <h2 id="projhead" style="cursor:pointer;user-select:none">PROJECTION &#9656;</h2>
+  <div id="projwrap" style="display:none">
+  <div class="btnrow" style="align-items:center"><button class="btn" id="sdfbtn">Distance field</button><input type="number" id="sdfsize" step="0.5" min="1" max="10" value="2" title="distance-field grid size" style="width:78px"><span class="mut">cm grid</span></div>
+  <div class="btnrow"><button class="btn ghost" id="selcbtn">Select vertex</button><button class="btn ghost" id="sldcbtn">Slide vertex</button></div>
+  <div class="btnrow"><button class="btn ghost" id="nearbtn">Nearest surface</button><button class="btn ghost" id="smoothbtn">Smooth surface</button></div>
+  <div class="btnrow"><button class="btn" id="updproj">Update projection</button><button class="btn ghost" id="undopbtn">Undo projection</button></div>
+  <div class="btnrow" style="align-items:center"><button class="btn" id="optbtn" title="Moves surface vertices next to checkMesh problem cells, keeping them on the surface, and keeps only changes that improve checkMesh. Each trial runs blockMesh + checkMesh.">Optimise mesh</button><input type="number" id="optiter" min="1" max="30" step="1" value="6" title="max iterations" style="width:56px"><select id="optsurf" title="surface the vertices are kept on" style="width:84px"><option value="smooth">smooth</option><option value="stl">STL</option></select></div>
+  <pre id="optlog"></pre>
+  </div>
+  <div class="btnrow"><button class="btn" id="expbtn">Write blockMeshDict</button></div>
+  <div class="btnrow"><button class="btn" id="runbmbtn">Run blockMesh</button></div>
+  <div class="btnrow"><button class="btn" id="chkmeshbtn">Run checkMesh</button></div>
+  <div id="checkstat" class="mut" style="white-space:pre-line"></div>
+  <h2 id="vishead" style="cursor:pointer;user-select:none">VISIBILITY &#9662;</h2>
+  <div id="viswrap">
+  <label class="chk"><input type="checkbox" id="shstl" checked> STL geometry</label>
+  <label class="chk"><input type="checkbox" id="shsdf" checked> distance field</label>
+  <label class="chk"><input type="checkbox" id="shface" checked> blocks</label>
+  <label class="chk"><input type="checkbox" id="shbox" checked> outer boundary</label>
+  <label class="chk"><input type="checkbox" id="shcell"> cell lines</label>
+  <label class="chk"><input type="checkbox" id="shedge" checked> projected edges</label>
+  <label class="chk"><input type="checkbox" id="shmesh"> projected mesh</label>
+  <label class="chk"><input type="checkbox" id="shbad"> negative volume cells (red) <span id="shbadn" class="mut"></span></label>
+  <label class="chk"><input type="checkbox" id="shnon"> non-orthogonal faces (orange) <span id="shnonn" class="mut"></span></label>
+  <label class="chk"><input type="checkbox" id="shskew"> highly skew faces (light green) <span id="shskewn" class="mut"></span></label>
+  <label class="chk"><input type="checkbox" id="shpyr"> face pyramid errors (cyan) <span id="shpyrn" class="mut"></span></label>
+  <label class="chk"><input type="checkbox" id="shhide"> hidden line mode</label>
+  </div>
+</aside>
+<div id="view"><canvas id="c" width="900" height="600"></canvas>
+  <div id="glstat">starting…</div>
+  <div id="pickinfo"></div>
+  <div id="hint">drag&nbsp;=&nbsp;orbit · wheel&nbsp;=&nbsp;zoom · right-drag&nbsp;=&nbsp;pan · click border&nbsp;=&nbsp;select · drag any plane&nbsp;=&nbsp;move · Del key&nbsp;=&nbsp;delete selected</div>
+  <div id="winrect"></div>
+</div>
+</div>
+<script>
+"use strict";
+/* ---------------- state ---------------- */
+const S = {
+  mode: "x",
+  hidePlanes: true,
+  tool: "navigate",
+  splits: {x: [], y: [], z: []},
+  over: {},                    // "i,j,k" -> 1 inside / 0 outside (manual)
+  blk: [],                     // [{k:[i,j,k], c:[x,y,z], s:0/1 effective}]
+  domain: {xmin:-8, xmax:12, ymin:-0.59, ymax:4, zmin:-4, zmax:4},
+  tables: null,
+  selected: null,
+  clickPt: null,
+  selBlock: null,
+  vertexTool: null,
+  vertexSel: null,
+  dictVerts: [],
+  projSegs: [],
+  pins: {},
+  dictGrid: null,
+  projDirty: false,
+  faceProj: null,
+  faceFidx: [],
+  opacity: 0.3,
+  proj: "ortho",
+  orthoH: 3.2,
+};
+const AXC = {x:0xff6b6b, y:0x3fd68c, z:0x4da3ff};
+const $ = id => document.getElementById(id);
+function log(m){ console.info("Blocksplit:",m); }
+function setStat(m){ const e=$("glstat"); if(e) e.textContent=m; }
+/* Keep run logs out of the sidebar: collapse to a short single line. */
+function tailMsg(s, n){
+  if(!s) return "";
+  const lines=String(s).split("\n").map(x=>x.trim()).filter(Boolean);
+  if(!lines.length) return "";
+  return lines.slice(-(n||3)).join(" · ");
+}
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  if(!r.ok) throw new Error(path + " -> " + r.status);
+  const ct = r.headers.get("content-type") || "";
+  return ct.includes("json") ? r.json() : r.text();
+}
+function busy(btn, on){
+  if(!btn || !btn.classList) return btn;
+  btn.classList.toggle("busy", !!on);
+  btn.disabled = !!on;
+  return btn;
+}
+/* ---------------- car math (mirrors backend tables) ---------------- */
+let ROOF=[], HALFW=[], UNDER=-0.41, GROUND=-0.59, BELT=0.17;
+let WFX0=-1.653, WFX1=-1.171, WRX0=0.879, WRX1=1.375, WZIN=0.74, WZOUT=1.012, WTOP=-0.10;
+function lerpTab(t, x){
+  if(x <= t[0][0]) return t[0][1];
+  if(x >= t[t.length-1][0]) return t[t.length-1][1];
+  for(let i=0;i<t.length-1;i++){
+    if(x >= t[i][0] && x <= t[i+1][0]){
+      const f=(x-t[i][0])/(t[i+1][0]-t[i][0]);
+      return t[i][1]+f*(t[i+1][1]-t[i][1]);
+    }
+  }
+  return t[0][1];
+}
+const roofC = x => lerpTab(ROOF, x), halfW = x => lerpTab(HALFW, x);
+function roofYZ(x, z){
+  const R = roofC(x), W = halfW(x);
+  if(W <= 1e-9) return R;
+  const az = Math.min(Math.abs(z)/W, 1);
+  return R - Math.max(0, R-BELT)*Math.pow(az, 2.5);
+}
+function sectionLoop(x, nSide){
+  nSide = nSide || 13;
+  const W = halfW(x), pts = [[UNDER,0],[UNDER,-W*0.7],[UNDER,-W]];
+  for(let i=0;i<nSide;i++){ const z=-W+2*W*i/(nSide-1); pts.push([roofYZ(x,z),z]); }
+  pts.push([UNDER,W],[UNDER,W*0.7],[UNDER,0]);
+  return pts.map(([y,z])=>{
+    if(((WFX0<x&&x<WFX1)||(WRX0<x&&x<WRX1)) && Math.abs(z)>WZIN && Math.abs(z)<WZOUT && y<WTOP)
+      return [GROUND,z];
+    return [y,z];
+  });
+}
+/* ---------------- three setup ---------------- */
+let renderer, scene, camera, controls, carMesh=null, markerPts=null, carPick=null, hideMesh=null, sdfMesh=null;
+let axesScene=null, axesCam=null, viewW=0, viewH=0, axDir=null;
+let camP=null, camO=null;
+let markerKeys=[];
+const planeGroup = new THREE.Group(), projGroup = new THREE.Group(),
+      anaGroup = new THREE.Group(), boxGroup = new THREE.Group(),
+      ifaceGroup = new THREE.Group(), blkGroup = new THREE.Group(),
+      rangeGroup = new THREE.Group(), cellGroup = new THREE.Group(),
+      meshGroup = new THREE.Group(), selGroup = new THREE.Group(),
+      badGroup = new THREE.Group(),
+      nonGroup = new THREE.Group(),
+      skewGroup = new THREE.Group(),
+      pyrGroup = new THREE.Group(),
+      optGroup = new THREE.Group(),
+      xGroup = new THREE.Group();
+let pickables = [];
+const cellQuads = [];
+function updateCellLines(){
+  const on=$("shcell")&&$("shcell").checked;
+  const cp=camera?camera.position:null, tg=controls?controls.target:null;
+  for(const q of cellQuads){
+    let vis=!!on;
+    if(vis&&cp&&tg){
+      const dx=cp.x-q.c[0], dy=cp.y-q.c[1], dz=cp.z-q.c[2];
+      vis=(q.n[0]*dx+q.n[1]*dy+q.n[2]*dz)>0;
+    }
+    q.obj.visible=vis;
+  }
+}
+/* Procedural studio environment: a soft sky/ground gradient with one bright
+   key patch, run through PMREM so every MeshStandardMaterial gets real
+   reflections instead of looking like flat plastic. */
+function buildEnv(){
+  try{
+    const W=64,H=32,data=new Uint8Array(W*H*4);
+    const top=[214,226,242],horizon=[124,132,146],floor=[24,27,34];
+    for(let y=0;y<H;y++){
+      const t=y/(H-1);
+      let c;
+      if(t<0.5){ const u=t/0.5; c=top.map((v,i)=>v+(horizon[i]-v)*u); }
+      else{ const u=(t-0.5)/0.5; c=horizon.map((v,i)=>v+(floor[i]-v)*u); }
+      for(let x=0;x<W;x++){
+        const a=(x/W)*Math.PI*2;
+        const boost=Math.max(0,Math.cos(a-2.4))*(1-t)*0.9;
+        const o=(y*W+x)*4;
+        data[o]  =Math.min(255,c[0]+boost*160);
+        data[o+1]=Math.min(255,c[1]+boost*160);
+        data[o+2]=Math.min(255,c[2]+boost*150);
+        data[o+3]=255;
+      }
+    }
+    const tex=new THREE.DataTexture(data,W,H,THREE.RGBAFormat);
+    tex.mapping=THREE.EquirectangularReflectionMapping;
+    if(THREE.sRGBEncoding!==undefined) tex.encoding=THREE.sRGBEncoding;
+    tex.needsUpdate=true;
+    const pmrem=new THREE.PMREMGenerator(renderer);
+    const env=pmrem.fromEquirectangular(tex).texture;
+    pmrem.dispose(); tex.dispose();
+    scene.environment=env;
+  }catch(e){ console.warn("env map unavailable:",e); }
+}
+function configureOrbitControls(){
+  if(!controls) return;
+  controls.enabled=true; controls.enableRotate=true; controls.enablePan=true; controls.enableZoom=true;
+  controls.enableDamping=false; controls.rotateSpeed=1;
+  controls.minAzimuthAngle=-Infinity; controls.maxAzimuthAngle=Infinity;
+  controls.minPolarAngle=0.001; controls.maxPolarAngle=Math.PI-0.001;
+}
+function initGL(){
+  if(typeof THREE === "undefined")
+    throw new Error("3D library failed to load (GET /vendor/three.min.js blocked?)");
+  if(!THREE.OrbitControls)
+    throw new Error("OrbitControls failed to load (GET /vendor/OrbitControls.js blocked?)");
+  const cv = $("c"), box = $("view");
+  setStat("creating 3D view…");
+  try{
+    renderer = new THREE.WebGLRenderer({canvas:cv, antialias:true});
+  }catch(e){
+    throw new Error("WebGL unavailable in this browser (" + e.message + ")");
+  }
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x14161b);
+  camera = new THREE.PerspectiveCamera(45, 1, 0.05, 200);
+  camP = camera;
+  camO = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.05, 200);
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  configureOrbitControls();
+  controls.target.set(0, 0.1, 0);
+  syncOrtho();
+  setView("iso");
+  if(S.proj==="ortho"){ switchCam(camO); }
+  scene.add(new THREE.HemisphereLight(0xdfeaff, 0x1a1d24, 0.95));
+  const d = new THREE.DirectionalLight(0xffffff, 0.85);
+  d.position.set(-4, 6, 3); scene.add(d);
+  // Fill/rim from the opposite side so curved surfaces don't fall flat.
+  const r1 = new THREE.DirectionalLight(0x9fb8de, 0.45);
+  r1.position.set(5, 2.5, -4); scene.add(r1);
+  const r2 = new THREE.DirectionalLight(0x6f7d95, 0.3);
+  r2.position.set(1, -4, 2); scene.add(r2);
+  buildEnv();
+  scene.add(planeGroup, projGroup, anaGroup, boxGroup, ifaceGroup, blkGroup, rangeGroup, cellGroup, meshGroup, selGroup, badGroup, nonGroup, skewGroup, pyrGroup, optGroup, xGroup);
+  axesScene = new THREE.Scene();
+  // Orthographic so the axis labels/gizmo keep a constant screen size
+  // (a perspective cam made them scale with distance).
+  const AXH = 2.3;
+  axesCam = new THREE.OrthographicCamera(-AXH, AXH, AXH, -AXH, 0.1, 100);
+  axesCam.position.set(0, 0, 4);
+  axesScene.add(new THREE.AxesHelper(1.4));
+  const axLabel=(t,c,p)=>{
+    const cv=document.createElement("canvas"); cv.width=cv.height=128;
+    const g=cv.getContext("2d");
+    g.font="bold 96px sans-serif"; g.textAlign="center"; g.textBaseline="middle";
+    g.fillStyle=c; g.fillText(t,64,70);
+    const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv), depthTest:false}));
+    sp.scale.set(0.62,0.62,1); sp.position.set(p[0],p[1],p[2]); sp.renderOrder=5;
+    axesScene.add(sp);
+  };
+  axLabel("x","#ff6b6b",[1.72,0,0]); axLabel("y","#3fd68c",[0,1.72,0]); axLabel("z","#4da3ff",[0,0,1.72]);
+  axDir = new THREE.Vector3();
+  new ResizeObserver(resize).observe(box); resize();
+  renderer.domElement.addEventListener("pointerdown", onDown);
+  renderer.domElement.addEventListener("pointermove", onMove);
+  renderer.domElement.addEventListener("pointerup", onUp);
+  (function loop(){
+    requestAnimationFrame(loop); controls.update(); updateCellLines(); sizeXMarks();
+    renderer.setScissorTest(false); renderer.setViewport(0, 0, viewW, viewH);
+    renderer.render(scene, camera);
+    if(axesScene && axesCam){
+      camera.getWorldDirection(axDir);
+      axesCam.position.set(-axDir.x*5, -axDir.y*5, -axDir.z*5);
+      axesCam.quaternion.copy(camera.quaternion);
+      renderer.clearDepth();
+      renderer.setScissorTest(true); renderer.setScissor(0, 0, 140, 140);
+      renderer.setViewport(0, 0, 140, 140);
+      renderer.render(axesScene, axesCam);
+      renderer.setScissorTest(false);
+    }
+  })();
+}
+window.addEventListener("pointerup",()=>{if(controls&&!dragging&&!painting) controls.enabled=true;});
+window.addEventListener("pointercancel",()=>{dragging=false;painting=false;if(controls)controls.enabled=true;});
+window.addEventListener("blur",()=>{dragging=false;painting=false;if(controls)controls.enabled=true;});
+function syncOrtho(){
+  if(!camO) return;
+  const a = S.viewA || 16/9, H = S.orthoH || 3.2;
+  camO.left = -H*a; camO.right = H*a; camO.top = H; camO.bottom = -H;
+  camO.updateProjectionMatrix();
+}
+function setRotationCenterPick(active){
+  rotationCenterPick=!!active;
+  const b=$("pivotbtn");
+  if(b) b.classList.toggle("on",rotationCenterPick);
+  if(renderer&&renderer.domElement) renderer.domElement.style.cursor=rotationCenterPick?"crosshair":"";
+  if(rotationCenterPick) log("click a point on the car to set the rotation centre");
+}
+if($("pivotbtn")) $("pivotbtn").onclick=()=>setRotationCenterPick(!rotationCenterPick);
+
+function switchCam(cam){
+  const t = controls.target.clone();
+  controls.dispose();
+  camera = cam;
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  configureOrbitControls();
+  controls.target.copy(t);
+  controls.update();
+}
+function toggleProj(){
+  if(!camP || !camO || !controls) return;
+  if(S.proj !== "ortho"){
+    S.proj = "ortho";
+    const d = camP.position.distanceTo(controls.target);
+    S.orthoH = Math.max(0.5, d * Math.tan(THREE.MathUtils.degToRad(camP.fov/2)));
+    syncOrtho();
+    camO.position.copy(camP.position);
+    camO.zoom = 1; camO.updateProjectionMatrix();
+    switchCam(camO);
+    $("projmode").textContent = "Ortho";
+  } else {
+    S.proj = "persp";
+    camP.position.copy(camO.position);
+    switchCam(camP);
+    $("projmode").textContent = "Persp";
+  }
+}
+function resize(){
+  const b = $("view").getBoundingClientRect();
+  let w = b.width, h = b.height;
+  if(!(w > 50 && h > 50)){
+    w = window.innerWidth - 340; h = window.innerHeight - 60;
+  }
+  if(!(w > 50 && h > 50)) return;
+  viewW=w; viewH=h;
+  renderer.setSize(w, h, false);
+  renderer.domElement.style.width = w + "px";
+  renderer.domElement.style.height = h + "px";
+  const a = w/h;
+  S.viewA = a;
+  if(camP){ camP.aspect = a; camP.updateProjectionMatrix(); }
+  syncOrtho();
+}
+function setView(n){
+  if(typeof camP === "undefined" || !camP) return;
+  // Exact axis-aligned elevations through the orbit target (no tilt).
+  const t = {iso:[8,4,9], front:[-11,0.1,0], side:[0,0.1,11], top:[0,13.1,0.1]}[n] || [8,4,9];
+  const up = (n==="top") ? [0,0,-1] : [0,1,0];
+  for(const cam of [camP, camO, camera]){
+    if(!cam) continue;
+    cam.up.set(up[0], up[1], up[2]);
+    cam.position.set(t[0], t[1], t[2]);
+    cam.zoom = 1; cam.updateProjectionMatrix();
+  }
+  if(typeof controls !== "undefined" && controls){
+    controls.target.set(0, 0.1, 0); controls.update();
+  }
+}
+if($("projmode")) $("projmode").onclick = toggleProj;
+document.querySelectorAll("header [data-view]").forEach(b =>
+  b.onclick = () => setView(b.dataset.view));
+
+/* ---- zoom window: press Win, then drag a box on screen -> zoom to that box ---- */
+const ZB = {on:false, id:null, x0:0, y0:0, x1:0, L:0, T:0, W:0, H:0};
+const ZB_MAX_OUT = 8;   // max zoom-out factor per drag
+function zoomBandSet(on){
+  ZB.on = !!on;
+  document.body.classList.toggle("zoomband", ZB.on);
+  const b = $("winbtn");
+  if(b) b.className = ZB.on ? "vbtn on" : "vbtn";
+  if(controls) controls.enabled = !ZB.on;
+  if(!ZB.on){ const r=$("winrect"); if(r) r.style.display="none"; ZB.id=null; }
+}
+if($("winbtn")) $("winbtn").onclick = ()=> zoomBandSet(!ZB.on);
+
+function _zbPlaneHit(nx, ny){
+  const nrm = camera.getWorldDirection(new THREE.Vector3());
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(nrm, controls.target);
+  const out = new THREE.Vector3();
+  let origin, dir;
+  if(camera.isOrthographicCamera){
+    // ortho rays are parallel to the view axis; the unprojected point IS on
+    // the ray for this screen position (using camera.position as origin is
+    // wrong here and skewed the selection corners).
+    // The unprojected point sits ~halfway between near/far (~100 units out),
+    // i.e. BEHIND the target plane, so a forward ray never hits it (null).
+    // Ortho rays are parallel, so just slide the point along the view axis
+    // onto the plane instead.
+    const p = new THREE.Vector3(nx, ny, 0.5).unproject(camera);
+    return plane.projectPoint(p, out);
+  } else {
+    origin = camera.position.clone();
+    dir = new THREE.Vector3(nx, ny, 0.5).unproject(camera).sub(origin).normalize();
+  }
+  return new THREE.Ray(origin, dir).intersectPlane(plane, out) ? out : null;
+}
+function zoomBandStart(ev){
+  if(!ZB.on) return false;
+  const vr = $("view").getBoundingClientRect();
+  ZB.id = ev.pointerId;
+  ZB.x0 = ev.clientX - vr.left; ZB.y0 = ev.clientY - vr.top;
+  ZB.W = ZB.H = 0; ZB.x1 = ZB.x0;
+  const r = $("winrect");
+  r.classList.remove("out");
+  r.style.display = "block"; r.style.left = ZB.x0+"px"; r.style.top = ZB.y0+"px";
+  r.style.width = "0px"; r.style.height = "0px";
+  try{ renderer.domElement.setPointerCapture(ev.pointerId); }catch(e){}
+  return true;
+}
+function zoomBandMove(ev){
+  if(!ZB.on || ZB.id === null) return false;
+  const vr = $("view").getBoundingClientRect();
+  const x1 = ev.clientX - vr.left, y1 = ev.clientY - vr.top;
+  ZB.x1 = x1;
+  ZB.L = Math.min(ZB.x0, x1); ZB.T = Math.min(ZB.y0, y1);
+  ZB.W = Math.abs(x1 - ZB.x0); ZB.H = Math.abs(y1 - ZB.y0);
+  const r = $("winrect");
+  r.style.left = ZB.L+"px"; r.style.top = ZB.T+"px";
+  r.style.width = ZB.W+"px"; r.style.height = ZB.H+"px";
+  r.classList.toggle("out", ZB.x1 < ZB.x0);   // right-to-left = zoom out
+  return true;
+}
+function zoomBandEnd(ev){
+  if(!ZB.on || ZB.id === null) return false;
+  const vr = $("view").getBoundingClientRect();
+  const W = ZB.W, H = ZB.H;
+  ZB.id = null;
+  const r = $("winrect"); if(r) r.style.display = "none";
+  if(W < 6 || H < 6) return true;            // too small -> ignore
+  const viewW = vr.width, viewH = vr.height;
+  const p0 = _zbPlaneHit((ZB.L/viewW)*2-1, -((ZB.T/viewH)*2-1));
+  const p1 = _zbPlaneHit(((ZB.L+W)/viewW)*2-1, -(((ZB.T+H)/viewH)*2-1));
+  if(!p0 || !p1) return true;
+  const center = p0.clone().add(p1).multiplyScalar(0.5);
+  const dv = p1.clone().sub(p0);
+  const right = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+  const up    = new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion);
+  const worldW = Math.abs(dv.dot(right)), worldH = Math.abs(dv.dot(up));
+  if(worldW < 1e-6 || worldH < 1e-6) return true;
+  const oldOff = camera.position.clone().sub(controls.target);
+  if(ZB.x1 < ZB.x0){
+    // ZOOM OUT (dragged right-to-left): the whole current view shrinks to fit
+    // inside the box. Factor is capped; the old view centre lands on the box centre.
+    const k = Math.min(viewW / W, viewH / H);
+    let kOut = Math.min(k, ZB_MAX_OUT);
+    if(camera.isOrthographicCamera){
+      kOut = Math.min(kOut, camera.zoom / 0.1);          // respect min ortho zoom
+    }
+    if(kOut <= 1.0001) { zoomBandSet(false); return true; }
+    const oldT = controls.target.clone();
+    const newT = oldT.clone().add(oldT.clone().sub(center).multiplyScalar(kOut));
+    controls.target.copy(newT);
+    if(camera.isOrthographicCamera){
+      camera.zoom = camera.zoom / kOut;
+      camera.updateProjectionMatrix();
+      camera.position.copy(newT).add(oldOff);
+    } else {
+      const off = oldOff.clone();
+      if(off.length() < 1e-6) off.set(0,0,1);
+      camera.position.copy(newT).add(off.setLength(oldOff.length() * kOut));
+    }
+    controls.update();
+    zoomBandSet(false);
+    log("zoomed out x" + kOut.toFixed(2));
+    return true;
+  }
+  // ZOOM IN (dragged left-to-right).
+  // Cover fit: the dragged rectangle FILLS the view. Nothing outside the
+  // selection is visible (excess is cropped on the mismatched axis).
+  const PAD = 1.0;
+  if(camera.isOrthographicCamera){
+    const zx = (camera.right - camera.left) / (worldW * PAD);
+    const zy = (camera.top - camera.bottom) / (worldH * PAD);
+    camera.zoom = Math.max(0.1, Math.min(200, Math.max(zx, zy)));
+    camera.updateProjectionMatrix();
+    controls.target.copy(center);
+    camera.position.copy(center).add(oldOff);
+  } else {
+    const vFOV = camera.fov * Math.PI / 180;
+    const a = Math.tan(vFOV/2);
+    const d = Math.min(worldH*PAD/(2*a), worldW*PAD/(2*a)/(camera.aspect));
+    const off = oldOff.clone();
+    if(off.length() < 1e-6) off.set(0,0,1);
+    controls.target.copy(center);
+    camera.position.copy(center).add(off.setLength(Math.max(d, 1e-3)));
+  }
+  controls.update();
+  zoomBandSet(false);
+  log("zoomed to selection");
+  return true;
+}
+document.addEventListener("keydown", (ev)=>{
+  const t=document.activeElement;
+  if(t&&(t.tagName==="INPUT"||t.tagName==="TEXTAREA")) return;
+  if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==="z"&&!ev.shiftKey){
+    ev.preventDefault(); undoLast(); return;
+  }
+  if((ev.key==="Delete"||ev.key==="Backspace")&&S.selected){
+    ev.preventDefault();
+    const {axis,value}=S.selected, L=S.splits[axis];
+    const i=L.findIndex(v=>Math.abs(v-value)<1e-9);
+    if(i>0&&i<L.length-1){ pushHist(); L.splice(i,1); log(`deleted ${axis}=${value.toFixed(3)}`); }
+    else log("cannot delete a domain bound");
+    S.selected=null; renderRows(); modelChanged(); renderSel();
+  }
+});
+/* ---------------- undo (Ctrl+Z) ---------------- */
+const hist=[];
+function snapGrid(){
+  return {x:[...S.splits.x],y:[...S.splits.y],z:[...S.splits.z],
+          domain:{...S.domain}, over:{...S.over},
+          pins:JSON.parse(JSON.stringify(S.pins))};
+}
+function pushHist(){ hist.push({t:"grid",s:snapGrid()}); if(hist.length>50) hist.shift(); }
+async function undoLast(){
+  const h=hist.pop();
+  if(!h) return;
+  if(h.t==="nc"){
+    try{
+      await api("/api/modify",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({block:h.block,nc:h.prev})});
+      await refreshBlocks(); renderBlockSel();
+    }catch(e){ log("undo failed: "+e.message); }
+    return;
+  }
+  S.splits={x:[...h.s.x],y:[...h.s.y],z:[...h.s.z]};
+  S.domain={...h.s.domain};
+  for(const [k,v] of [["dxmin",S.domain.xmin],["dxmax",S.domain.xmax],["dymin",S.domain.ymin],
+                      ["dymax",S.domain.ymax],["dzmin",S.domain.zmin],["dzmax",S.domain.zmax]])
+    $(k).value=v;
+  S.selected=null; S.selBlock=null;
+  renderRows(); modelChanged(); renderSel(); renderBlockSel();
+  S.over={...h.s.over};
+  S.pins=JSON.parse(JSON.stringify(h.s.pins||{}));
+  S.vertexSel=null; showX("w",null); hideAllGreen();
+  for(const k in S.pins) showX("g",S.pins[k],k);
+  S.projDirty=true;
+  await refreshBlocks();
+}
+/* ---------------- car + planes ---------------- */
+async function loadCar(stride){
+  const j = await api("/api/stl?stride=" + stride);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(j.positions, 3));
+  g.setIndex(j.index); g.computeVertexNormals();
+  if(carMesh){ scene.remove(carMesh); carMesh.geometry.dispose(); }
+  carMesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial(
+    {color:0x9fa4ab, roughness:0.55, metalness:0.15}));
+  carMesh.userData.pick = {kind:"car"};
+  carMesh.visible = $("shstl").checked;
+  scene.add(carMesh); refreshPick();
+  carMesh.material.transparent=true; carMesh.material.opacity=0.3; carMesh.material.depthWrite=false; carMesh.renderOrder=5;
+  // Full-res invisible pick mesh: display mesh is decimated (stride 6) and
+  // full of holes, so rays slip through. Pick against all 30k tris instead.
+  if(!carPick && stride !== 1){
+    api("/api/stl?stride=1").then(j2 => {
+      const g2 = new THREE.BufferGeometry();
+      g2.setAttribute("position", new THREE.Float32BufferAttribute(j2.positions, 3));
+      g2.setIndex(j2.index);
+      carPick = new THREE.Mesh(g2, new THREE.MeshBasicMaterial());
+      carPick.visible = false;
+      carPick.updateMatrixWorld(true);
+      scene.add(carPick);
+      // Full-res surface now exists: upgrade the hidden-line occluder to it.
+      if($("shhide") && $("shhide").checked){
+        const h=ensureHide(); if(h) h.visible=$("shmesh").checked || $("shedge").checked;
+      }
+    }).catch(()=>{});
+  }
+  if($("shhide") && $("shhide").checked && (( $("shmesh") && $("shmesh").checked) || ($("shedge") && $("shedge").checked))){
+    const h=ensureHide(); if(h) h.visible=true;
+  }
+}
+const HIDE_BIAS=0.03; // world units; raise if front lines still vanish, lower if back lines leak through
+function ensureHide(){
+  // Depth-only occluder for hidden-line mode: writes depth (no colour) so
+  // projected mesh lines behind the car surface are hidden. Use the full-res
+  // STL geometry when available (the same surface the projected lines sit on)
+  // so front-face lines aren't culled by the coarse decimated display mesh.
+  const g = (carPick && carPick.geometry) ? carPick.geometry
+                                          : (carMesh && carMesh.geometry);
+  if(!g) return null;
+  if(!hideMesh || hideMesh.geometry!==g){
+    if(hideMesh){ scene.remove(hideMesh); }
+    // The projected lines are straight chords between surface-projected
+    // points, so on curved panels they dip slightly *inside* the surface and
+    // fail the depth test even when they face the camera. Push the occluder
+    // away from the camera in view space by HIDE_BIAS (world units) so those
+    // near-surface lines survive, while genuinely hidden lines (on the far
+    // side of the car) are still occluded. DoubleSide so inconsistent STL
+    // winding can't punch holes in the occluder.
+    hideMesh=new THREE.Mesh(g, new THREE.ShaderMaterial({
+      uniforms:{uBias:{value:HIDE_BIAS}},
+      vertexShader:"uniform float uBias;void main(){vec4 mv=modelViewMatrix*vec4(position,1.0);mv.z-=uBias;gl_Position=projectionMatrix*mv;}",
+      fragmentShader:"void main(){gl_FragColor=vec4(0.0);}",
+      colorWrite:false, depthWrite:true, side:THREE.DoubleSide,
+      polygonOffset:true, polygonOffsetFactor:1, polygonOffsetUnits:2}));
+    hideMesh.renderOrder=-1;
+    hideMesh.visible=$("shhide") && $("shhide").checked && (( $("shmesh") && $("shmesh").checked) || ($("shedge") && $("shedge").checked));
+    scene.add(hideMesh);
+  }
+  return hideMesh;
+}
+function clearGroup(gr){ for(let i=gr.children.length-1;i>=0;i--){ const o=gr.children[i]; gr.remove(o); if(o.geometry)o.geometry.dispose(); } }
+function clipExt(){
+  // Display-only clipping of split planes to the car region + margin.
+  // The mesh itself always uses full wall-to-wall planes (structured mesh
+  // requirement); this only changes what is drawn.
+  if(!$("shclip")||!$("shclip").checked) return null;
+  const m=Math.max(0,parseFloat($("clipm").value)||0), D=S.domain;
+  return {
+    x0:Math.max(D.xmin,-2.267-m), x1:Math.min(D.xmax,2.267+m),
+    y0:Math.max(D.ymin,-0.59),    y1:Math.min(D.ymax,0.61+m),
+    z0:Math.max(D.zmin,-1.05-m),  z1:Math.min(D.zmax,1.05+m)};
+}
+function planeMesh(axis, val, color, opacity){
+  const D = S.domain, C = clipExt();
+  const X0=C?C.x0:D.xmin, X1=C?C.x1:D.xmax;
+  const Y0=C?C.y0:D.ymin, Y1=C?C.y1:D.ymax;
+  const Z0=C?C.z0:D.zmin, Z1=C?C.z1:D.zmax;
+  let w, h, rot;
+  if(axis==="x"){ w=Z1-Z0; h=Y1-Y0; rot=["y",Math.PI/2]; }
+  else if(axis==="y"){ w=X1-X0; h=Z1-Z0; rot=["x",-Math.PI/2]; }
+  else { w=X1-X0; h=Y1-Y0; rot=null; }
+  const grp = new THREE.Group();
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w,h),
+    new THREE.MeshBasicMaterial({color, transparent:true, opacity,
+      side:THREE.DoubleSide, depthWrite:false}));
+  const e = new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry),
+    new THREE.LineBasicMaterial({color}));
+  if(rot){ grp.rotation[rot[0]] = rot[1]; }
+  grp.add(m, e);
+  // centre the quad on the (possibly clipped) range, not on zero —
+  // otherwise asymmetric domains overshoot on one side and fall short other.
+  if(axis==="x"){ grp.position.set(val, (Y0+Y1)/2, (Z0+Z1)/2); }
+  else if(axis==="y"){ grp.position.set((X0+X1)/2, val, (Z0+Z1)/2); }
+  else { grp.position.set((X0+X1)/2, (Y0+Y1)/2, val); }
+  return grp;
+}
+function modelChanged(){
+  // single path for every structural edit: planes, blocks
+  S.selBlock=null; S.rangeSel=null;
+  S.projDirty=true;
+  S.vertexSel=null; showX("w",null); S.rangeSel=null;
+  syncRangeSliders();
+  rebuildPlanes(); refreshBlocks(); renderRows(); renderBlockSel();
+}
+function rebuildPlanes(){
+  clearGroup(planeGroup);
+  const axes = S.hidePlanes ? [] : (S.mode==="all" ? ["x","y","z"] : [S.mode]);
+  for(const ax of axes){
+    for(const v of S.splits[ax].slice(1,-1)){
+      const g = planeMesh(ax, v, AXC[ax], S.opacity);
+      g.userData.pick = {kind:"split", axis:ax, value:v};
+      g.userData.value = v;
+      planeGroup.add(g);
+    }
+  }
+  clearGroup(boxGroup);
+  if($("shbox").checked){
+    const D=S.domain, c=[[D.xmin,D.ymin,D.zmin],[D.xmax,D.ymin,D.zmin],
+      [D.xmax,D.ymax,D.zmin],[D.xmin,D.ymax,D.zmin],
+      [D.xmin,D.ymin,D.zmax],[D.xmax,D.ymin,D.zmax],
+      [D.xmax,D.ymax,D.zmax],[D.xmin,D.ymax,D.zmax]];
+    const E=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+    const p=[];
+    for(const [a,b] of E){ p.push(...c[a], ...c[b]); }
+    const g=new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(p,3));
+    boxGroup.add(new THREE.LineSegments(g,
+      new THREE.LineBasicMaterial({color:0x555b66})));
+  }
+  if(carMesh) carMesh.visible = $("shstl").checked;
+  refreshPick();
+  refreshSelHL();
+}
+function refreshPick(){
+  pickables = [];
+  if(carMesh) pickables.push(carMesh);
+  if(sdfMesh) pickables.push(sdfMesh);
+  for(const g of planeGroup.children){
+    if(g.userData.pick) pickables.push(g.children[0]);
+  }
+  // NOTE: block-centre markers are picked separately via markerHit(), not here.
+}
+function refreshSelHL(){
+  for(let i=projGroup.children.length-1;i>=0;i--){
+    const o=projGroup.children[i];
+    if(o.userData.hl){ projGroup.remove(o); if(o.geometry)o.geometry.dispose(); }
+  }
+  // NOTE: no selection outline — the translucent plane itself is the split.
+  const onEd = !$("shedge") || $("shedge").checked;
+  const F = S.faceProj;
+  if(F && ((F.faceIndices&&F.faceIndices.length)||(F.curves&&F.curves.length)||(F.bands&&F.bands.length))){
+    // Draw block-face edges without a blockMesh polyLine in pale green.
+    // Curved dictionary edges are overlaid below in the brighter green.
+    const curvedKeys=new Set((F.curveIds||[]).map(e=>[...e].sort((a,b)=>a-b).join(":")));
+    const straight=[];
+    for(const face of (F.faceIndices||[])) for(let i=0;i<face.length;i++){
+      const a=face[i], b=face[(i+1)%face.length];
+      if(curvedKeys.has([a,b].sort((x,y)=>x-y).join(":"))) continue;
+      const pa=S.dictVerts[a], pb=S.dictVerts[b];
+      if(pa&&pb) straight.push(...pa,...pb);
+    }
+    if(straight.length){
+      const g=new THREE.BufferGeometry();
+      g.setAttribute("position",new THREE.Float32BufferAttribute(straight,3));
+      const o=new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0xa8ffc2}));
+      o.userData.hl=true; o.visible=onEd; projGroup.add(o);
+    }
+    for(const L of (F.curves||[])){
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(L.flat(),3));
+      const o = new THREE.Line(g, new THREE.LineBasicMaterial({color:0x39ff88}));
+      o.userData.hl = true; o.visible=onEd; projGroup.add(o);
+    }
+    if(F.bands && F.bands.length){
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(F.bands.flat(),3));
+      const o = new THREE.Points(g, new THREE.PointsMaterial({color:0x39ff88, size:3}));
+      o.userData.hl = true; o.visible=onEd; projGroup.add(o);
+    }
+  }
+}
+/* ---------------- blocks: centres + interface ---------------- */
+function overLists(){
+  const so=[], fl=[];
+  for(const k in S.over){ (S.over[k] ? so : fl).push(k.split(",").map(Number)); }
+  return {so, fl};
+}
+async function refreshBlocks(){
+  try{
+    const {so, fl} = overLists();
+    const r = await api("/api/interface", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({x:S.splits.x, y:S.splits.y, z:S.splits.z,
+                           solid:so, fluid:fl})});
+    S.blk = r.blocks;
+    S.wallq = r.wallq || [];
+    // block-centre markers removed (visibility toggle deleted)
+    clearGroup(blkGroup); markerKeys = []; markerPts = null;
+    // interface overlay (the faces that will project onto the surface)
+    for(let i=ifaceGroup.children.length-1;i>=0;i--){
+      const o=ifaceGroup.children[i]; ifaceGroup.remove(o); if(o.geometry)o.geometry.dispose();
+    }
+    for(let i=cellGroup.children.length-1;i>=0;i--){
+      const o=cellGroup.children[i]; cellGroup.remove(o); if(o.geometry)o.geometry.dispose();
+    }
+    if(r.wall.length){
+      const wq=r.wallq||[];
+      // black block edges over the faces, subdivided by the block's cell
+      // counts so every inter-cell line shows (wall arrives as quads)
+      const bili=(Q,s,t)=>{
+        const a0=[Q[0][0]+(Q[1][0]-Q[0][0])*s, Q[0][1]+(Q[1][1]-Q[0][1])*s, Q[0][2]+(Q[1][2]-Q[0][2])*s];
+        const a1=[Q[3][0]+(Q[2][0]-Q[3][0])*s, Q[3][1]+(Q[2][1]-Q[3][1])*s, Q[3][2]+(Q[2][2]-Q[3][2])*s];
+        return [a0[0]+(a1[0]-a0[0])*t, a0[1]+(a1[1]-a0[1])*t, a0[2]+(a1[2]-a0[2])*t];
+      };
+      const edgeAxis=(A,B)=>{
+        for(let a=0;a<3;a++) if(A[a]!==B[a]) return a;
+        return 0;
+      };
+      const lp=[];
+      const _grid=S.dictGrid||S.splits;
+      const _nx=_grid.x.length-1, _ny=_grid.y.length-1;
+      const _curveKeys=new Set((S.faceProj?.curveIds||[]).map(e=>[...e].sort((a,b)=>a-b).join(":")));
+      const _vId=e=>e[0]+(_nx+1)*(e[1]+(_ny+1)*e[2]);
+      const _isCurve=(a,b)=>_curveKeys.has([_vId(a),_vId(b)].sort((x,y)=>x-y).join(":"));
+      if(wq.length){
+        for(const w of wq){
+          const b=findBlock(w.b);
+          const nc=b&&b.nc?b.nc:[1,1,1];
+          const Q=w.q, E=w.e;
+          const nu=Math.max(1,nc[edgeAxis(E[0],E[1])]||1);
+          const nv=Math.max(1,nc[edgeAxis(E[1],E[2])]||1);
+          for(let a=0;a<=nu;a++)for(let b2=0;b2<=nv;b2++){
+            if(a<nu){
+              const onCurve=(b2===0&&_isCurve(E[0],E[1]))||(b2===nv&&_isCurve(E[3],E[2]));
+              if(!onCurve){const p0=bili(Q,a/nu,b2/nv),p1=bili(Q,(a+1)/nu,b2/nv);lp.push(...p0,...p1);}
+            }
+            if(b2<nv){
+              const onCurve=(a===0&&_isCurve(E[0],E[3]))||(a===nu&&_isCurve(E[1],E[2]));
+              if(!onCurve){const p0=bili(Q,a/nu,b2/nv),p1=bili(Q,a/nu,(b2+1)/nv);lp.push(...p0,...p1);}
+            }
+          }
+        }
+      } else {
+        for(let f=0; f+5<r.wall.length; f+=6){
+          const q=[r.wall[f],r.wall[f+1],r.wall[f+2],r.wall[f+5]];
+          for(const [a,b] of [[0,1],[1,2],[2,3],[3,0]]) lp.push(...q[a], ...q[b]);
+        }
+      }
+      if(lp.length){
+        const lg=new THREE.BufferGeometry();
+        lg.setAttribute("position", new THREE.Float32BufferAttribute(lp,3));
+        const lm=new THREE.LineSegments(lg,
+          new THREE.LineBasicMaterial({color:0xffffff}));
+        lm.visible=$("shcell")&&$("shcell").checked;
+        lm.userData.cellLines=true;
+        cellGroup.add(lm);
+      }
+    }
+    if(showMode) buildRangeBoxes();
+    // Always rebuild the projected edges after any block change so they track
+    // LIVE→DEAD flips even when the overlay is toggled off.
+    await refreshProjectedMesh();
+  }catch(e){ log("blocks refresh failed: "+e.message); }
+}
+/* projected mesh: the cell lines above, every vertex snapped onto the car
+   surface (STL) so the subdivision drapes over the body. */
+let meshBusy=false;
+function _bili(Q,s,t){
+  const a0=[Q[0][0]+(Q[1][0]-Q[0][0])*s, Q[0][1]+(Q[1][1]-Q[0][1])*s, Q[0][2]+(Q[1][2]-Q[0][2])*s];
+  const a1=[Q[3][0]+(Q[2][0]-Q[3][0])*s, Q[3][1]+(Q[2][1]-Q[3][1])*s, Q[3][2]+(Q[2][2]-Q[3][2])*s];
+  return [a0[0]+(a1[0]-a0[0])*t, a0[1]+(a1[1]-a0[1])*t, a0[2]+(a1[2]-a0[2])*t];
+}
+async function refreshProjectedMesh(){
+  if(meshBusy) return; meshBusy=true;
+  try{
+    clearGroup(meshGroup);
+    const wq = S.wallq || [];
+    if(!wq.length){ meshGroup.visible=false; meshBusy=false; return; }
+    const key2i=new Map(), uniq=[], segs=[];
+    const add=p=>{
+      const kk=p[0].toFixed(5)+","+p[1].toFixed(5)+","+p[2].toFixed(5);
+      let ix=key2i.get(kk);
+      if(ix===undefined){ ix=uniq.length; key2i.set(kk,ix); uniq.push(p); }
+      return ix;
+    };
+    const edgeAxis=(A,B)=>{ for(let a=0;a<3;a++) if(A[a]!==B[a]) return a; return 0; };
+    // Prefer the projected (dict) wall positions so the mesh tracks the pins;
+    // fall back to the ideal interface grid before the first projection.
+    const dv=S.dictVerts||[];
+    const NX=S.splits.x.length-1, NY=S.splits.y.length-1, NZ=S.splits.z.length-1;
+    const dvOK=dv.length===(NX+1)*(NY+1)*(NZ+1);
+    for(const w of wq){
+      const b=findBlock(w.b);
+      const nc=b&&b.nc?b.nc:[1,1,1];
+      const E=w.e;
+      let Q=w.q;
+      if(dvOK){
+        const qq=E.map(e=>dv[e[0]+(NX+1)*(e[1]+(NY+1)*e[2])]);
+        if(qq.every(q=>q)) Q=qq;
+      }
+      const nu=Math.max(1,nc[edgeAxis(E[0],E[1])]||1);
+      const nv=Math.max(1,nc[edgeAxis(E[1],E[2])]||1);
+      const grid=[];
+      for(let a=0;a<=nu;a++){
+        const row=[];
+        for(let c=0;c<=nv;c++) row.push(add(_bili(Q,a/nu,c/nv)));
+        grid.push(row);
+      }
+      for(let a=0;a<=nu;a++)for(let c=0;c<=nv;c++){
+        if(a<nu) segs.push(grid[a][c], grid[a+1][c]);
+        if(c<nv) segs.push(grid[a][c], grid[a][c+1]);
+      }
+    }
+    if(!uniq.length){ meshGroup.visible=false; meshBusy=false; return; }
+    const r = await api("/api/projectmesh", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({points:uniq})});
+    const P = r.points || [];
+    const lp=[];
+    for(const s of segs){ const q=P[s]; if(q) lp.push(q[0],q[1],q[2]); }
+    const lg=new THREE.BufferGeometry();
+    lg.setAttribute("position", new THREE.Float32BufferAttribute(lp,3));
+    const lm=new THREE.LineSegments(lg,
+      new THREE.LineBasicMaterial({color:0x00ffd0}));
+    lm.userData.projMesh=true;
+    meshGroup.add(lm);
+    meshGroup.visible=$("shmesh").checked;
+    log("projected mesh: "+uniq.length+" verts");
+  }catch(e){ log("projected mesh failed: "+e.message); }
+  meshBusy=false;
+}
+function paintBlock(key, state){
+  S.over[key] = state;
+  const i = markerKeys.indexOf(key);
+  if(i >= 0 && markerPts){
+    const c = state ? new THREE.Color(0xff5555) : new THREE.Color(0x4488ff);
+    markerPts.geometry.attributes.color.setXYZ(i, c.r, c.g, c.b);
+    markerPts.geometry.attributes.color.needsUpdate = true;
+  }
+}
+/* ---------------- picking + drag + paint ---------------- */
+const ray = new THREE.Raycaster();
+ray.params.Line = {threshold:0.035};
+ray.params.Points = {threshold:0.07};
+const ptr = new THREE.Vector2();
+let downXY=null, downHit=null, dragging=false, painting=false, paintState=1;
+let rotationCenterPick=false;
+function castAt(ev, targets){
+  const r = renderer.domElement.getBoundingClientRect();
+  ptr.x = ((ev.clientX-r.left)/r.width)*2-1;
+  ptr.y = -((ev.clientY-r.top)/r.height)*2+1;
+  ray.setFromCamera(ptr, camera);
+  const hits = ray.intersectObjects(targets, true);
+  return hits.length ? hits[0] : null;
+}
+function groupOf(o){ while(o && !o.userData.pick) o=o.parent; return o; }
+function blockAt(p){
+  const pick=(v,L)=>{ if(v<=L[0]) return 0; for(let i=0;i<L.length-1;i++){ if(v<=L[i+1]) return i; } return L.length-2; };
+  return [pick(p.x,S.splits.x),pick(p.y,S.splits.y),pick(p.z,S.splits.z)];
+}
+function onlySolid(key){
+  if(!key) return null;
+  const b=findBlock(key);
+  return (b&&b.s)?key:null;
+}
+function redirectInside(key){
+  // Clicks on an interface face must select the INSIDE (solid) block:
+  // if the containing block is fluid but touches solid, and the click is
+  // close to their shared face, return the solid neighbour instead.
+  const byK={}; for(const b of S.blk) byK[b.k.join(",")]=b;
+  const cur=byK[key.join(",")];
+  if(!cur||cur.s) return key;
+  const axs=["x","y","z"];
+  const D=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  let best=null, bd=1e100;
+  for(const d of D){
+    const nk=[key[0]+d[0],key[1]+d[1],key[2]+d[2]];
+    const nb=byK[nk.join(",")];
+    if(!(nb&&nb.s)) continue;
+    const ax=d[0]?0:(d[1]?1:2);
+    const L=S.splits[axs[ax]];
+    const pl=L[key[ax]+(d[ax]>0?1:0)];
+    const dd=Math.abs([S.clickPt.x,S.clickPt.y,S.clickPt.z][ax]-pl);
+    if(dd<bd){ bd=dd; best=nk; }
+  }
+  if(!best) return key;
+  const sx=S.splits.x, sy=S.splits.y, sz=S.splits.z;
+  const dims=[sx[key[0]+1]-sx[key[0]],sy[key[1]+1]-sy[key[1]],sz[key[2]+1]-sz[key[2]]];
+  return (bd<=Math.min(...dims)*0.25)?best:key;
+}
+function rayFallbackPoint(ev){
+  // Closest point on the click-ray to the car centre: guarantees a usable
+  // coordinate even when the ray hits no triangle (holes / empty space).
+  try{
+    const r = renderer.domElement.getBoundingClientRect();
+    ptr.x = ((ev.clientX-r.left)/r.width)*2-1;
+    ptr.y = -((ev.clientY-r.top)/r.height)*2+1;
+    ray.setFromCamera(ptr, camera);
+    const o = ray.ray.origin, d = ray.ray.direction;
+    const t = Math.max(0, (0-o.x)*d.x + (0.1-o.y)*d.y + (0-o.z)*d.z);
+    const D = S.domain;
+    return {
+      x: Math.min(D.xmax, Math.max(D.xmin, o.x+d.x*t)),
+      y: Math.min(D.ymax, Math.max(D.ymin, o.y+d.y*t)),
+      z: Math.min(D.zmax, Math.max(D.zmin, o.z+d.z*t))};
+  }catch(e){ return null; }
+}
+function markerHit(ev){
+  if(!markerPts || !markerPts.visible) return null;
+  const h = castAt(ev, [markerPts]);
+  if(!h || h.index===undefined) return null;
+  return markerKeys[h.index] || null;
+}
+function onDown(ev){
+  if(ev.button!==0) return;
+  if(zoomBandStart(ev)) return;
+  if(rotationCenterPick){ downXY=[ev.clientX,ev.clientY]; controls.enabled=false; return; }
+  downXY=[ev.clientX,ev.clientY];
+  // Block selection works regardless of tool: click a block's edge/face to
+  // select it. Done here (not on pointerup) so a plain click always registers.
+  selectBlockAt(ev);
+  if(S.tool!=="navigate"){
+    const key = markerHit(ev);
+    if(key!==null){
+      paintState = S.tool==="in" ? 1 : 0;
+      painting=true; controls.enabled=false;
+      try{renderer.domElement.setPointerCapture(ev.pointerId);}catch(e){}
+      paintBlock(key, paintState);
+    }
+    return;
+  }
+  downHit=null;
+  // Vertex select/slide only work while the PROJECTION panel is open.
+  const pw=$("projwrap"), projOpen = pw && pw.style.display!=="none";
+  if(projOpen && S.vertexTool==="select"){
+    const vidx=pickVertex(ev);
+    if(vidx!==null){
+      selectVertex(vidx);
+      setStat(`vertex ${vidx} selected — switch to Slide to move it`);
+    } else {
+      setStat("no surface vertex near the click");
+    }
+    return;
+  }
+  if(projOpen && S.vertexTool==="slide"){
+    if(S.vertexSel===null){
+      // nothing selected yet — select the one under the cursor, then drag
+      const vidx=pickVertex(ev);
+      if(vidx===null){ setStat("slide: pick a vertex first (Select vertex)"); return; }
+      selectVertex(vidx);
+    }
+    S._pinPushed=false;
+    S._slidePt=null;
+    dragging=true; controls.enabled=false;
+    try{renderer.domElement.setPointerCapture(ev.pointerId);}catch(e){}
+    _showVertexX(S.vertexSel, true);
+    return;
+  }
+  const h = castAt(ev, pickables);
+  let gh = h ? groupOf(h.object) : null;
+  let pkh = gh ? gh.userData.pick : null;
+  if(!(pkh && pkh.kind==="split")){
+    const ns = nearSplit(ev);
+    if(ns){ gh = ns.group; pkh = gh.userData.pick; }
+  }
+  if(pkh && pkh.kind==="split"){
+    S.selected={axis:pkh.axis,value:pkh.value};
+    S._dragFrom=pkh.value;
+    S._dragList=[...S.splits[pkh.axis]];
+    S._dragIdx=S.splits[pkh.axis].findIndex(v=>Math.abs(v-pkh.value)<1e-9);
+    S._dragGroup=gh;
+    renderSel();
+    dragging=true; controls.enabled=false;
+    try{renderer.domElement.setPointerCapture(ev.pointerId);}catch(e){}
+    log(`grabbed ${pkh.axis}=${Number(pkh.value).toFixed(3)} — drag to move`);
+  }
+}
+/* ---------------- vertex select / slide ---------------- */
+function _vertexPos(vidx){
+  if(vidx===null||vidx===undefined||!S.dictVerts) return null;
+  /* Always mark where the vertex actually IS in system/blockMeshDict: pin
+     values may be stale or keyed with a different number format, and the dict
+     already holds every applied pin. */
+  return S.dictVerts[vidx] || null;
+}
+/* White X = selected vertex's current (projected) position.
+   Green X = live drag position while sliding. */
+function _showVertexX(vidx, sliding){
+  const pos=_vertexPos(vidx);
+  if(!pos){ showX("w",null); return; }
+  showX("w",pos);
+  if(sliding) showX("g",S._slidePt||pos, "slide");
+  else showX("g",pos, "slide");
+}
+function selectVertex(vidx){
+  S.vertexSel=vidx;
+  const pos=_vertexPos(vidx);
+  // On select, show ONLY the white cross at the vertex.
+  hideAllGreen();
+  showX("w",pos);
+  showPickInfo(pos, vidx);
+  S._slidePt=null; S._pinPushed=false;
+}
+/* Move the selected vertex: the cursor's screen motion is turned into a world
+   delta in the camera's view plane, applied to the current pin position. The
+   green X tracks the new location. */
+/* Edges of the projected blockMeshDict wall that touch `vid`: the two
+   neighbours in every body/wheels quad plus wall polyLine pairs. */
+function _incidentEdges(vid){
+  const seen=new Set(), out=[];
+  const add=(a,b)=>{
+    if(a===b) return;
+    const va=S.dictVerts[a], vb=S.dictVerts[b];
+    if(!va||!vb) return;
+    const id=(a<b?a+"|"+b:b+"|"+a);
+    if(seen.has(id)) return;
+    seen.add(id); out.push([a,b]);
+  };
+  const f=(S.faceProj&&S.faceProj.faceIndices)||[];
+  for(const q of f){
+    if(!Array.isArray(q)) continue;
+    for(let i=0;i<q.length;i++) if(q[i]===vid) add(q[i], q[(i+1)%q.length]);
+  }
+  const ci=(S.faceProj&&S.faceProj.curveIds)||[];
+  for(const pr of ci){
+    if(!Array.isArray(pr)||pr.length<2) continue;
+    if(pr[0]===vid) add(pr[0],pr[1]);
+    if(pr[1]===vid) add(pr[1],pr[0]);
+  }
+  return out;
+}
+/* Closest point on segment A-B to the pick ray (origin o, unit direction d). */
+function _raySegPoint(o,d,A,B){
+  const ux=B[0]-A[0], uy=B[1]-A[1], uz=B[2]-A[2];
+  const wx=A[0]-o.x, wy=A[1]-o.y, wz=A[2]-o.z;
+  const a=ux*ux+uy*uy+uz*uz;
+  const b=ux*d.x+uy*d.y+uz*d.z;
+  const c=d.x*d.x+d.y*d.y+d.z*d.z;
+  const dd=ux*wx+uy*wy+uz*wz;
+  const e=d.x*wx+d.y*wy+d.z*wz;
+  const den=a*c-b*b;
+  let s=(Math.abs(den)<1e-12)?0:(b*e-c*dd)/den;
+  s=Math.max(0,Math.min(1,s));
+  const P=[A[0]+ux*s, A[1]+uy*s, A[2]+uz*s];
+  const px=P[0]-o.x, py=P[1]-o.y, pz=P[2]-o.z;
+  const t=px*d.x+py*d.y+pz*d.z;
+  const rx=px-t*d.x, ry=py-t*d.y, rz=pz-t*d.z;
+  return {P:P, dist2:rx*rx+ry*ry+rz*rz};
+}
+/* Slide the selected vertex ALONG its projected wall edges: the cursor ray is
+   intersected with every incident edge segment and the nearest hit wins, so
+   the green marker stays on the edge network instead of floating freely. */
+function slideVertex(ev){
+  if(S.vertexSel===null||!S.dictVerts) return;
+  const cur=_vertexPos(S.vertexSel);
+  if(!cur) return;
+  if(!S._slidePt){ S._slidePt=[cur[0],cur[1],cur[2]]; S._pinPushed=false; }
+  if(!ev||!camera||!renderer||!ray||!ptr) return;
+  const r=renderer.domElement.getBoundingClientRect();
+  ptr.x=((ev.clientX-r.left)/r.width)*2-1;
+  ptr.y=-((ev.clientY-r.top)/r.height)*2+1;
+  ray.setFromCamera(ptr,camera);
+  const o=ray.ray.origin, d=ray.ray.direction;
+  const edges=_incidentEdges(S.vertexSel);
+  let best=null, bestD=Infinity;
+  for(const [a,b] of edges){
+    const hit=_raySegPoint(o,d,S.dictVerts[a],S.dictVerts[b]);
+    if(hit.dist2<bestD){ bestD=hit.dist2; best=hit.P; }
+  }
+  /* No projected edges (isolated vertex): keep the old free screen-plane move. */
+  if(!best){
+    const dx=(ev.movementX||0), dy=(ev.movementY||0);
+    const base=S._slidePt||cur;
+    const dist=camera.position.distanceTo(new THREE.Vector3(base[0],base[1],base[2]));
+    const upx=(2*Math.tan(((camera.fov||45)*Math.PI/180)/2)*dist)/Math.max(r.height,1);
+    const right=new THREE.Vector3(), up=new THREE.Vector3();
+    camera.matrixWorld.extractBasis(right, up, new THREE.Vector3());
+    best=[base[0]+right.x*dx*upx+up.x*dy*upx,
+          base[1]+right.y*dx*upx+up.y*dy*upx,
+          base[2]+right.z*dx*upx+up.z*dy*upx];
+  }
+  S._slidePt=[best[0],best[1],best[2]];
+  showX("w",best);
+  showX("g",best, "slide");
+  showPickInfo(best, S.vertexSel);
+}
+/* Mouse released after a slide drag: write the dragged position as this
+   vertex's pin (and into blockMeshDict). */
+async function commitSlide(){
+  const pt=S._slidePt;
+  S._slidePt=null;
+  if(!pt||S.vertexSel===null||S.vertexSel===undefined) return;
+  await _applyVertexPin(pt, "slide: vertex moved");
+}
+function axisExtent(ax){
+  const D=S.domain;
+  return ax==="x"?D.xmax-D.xmin:(ax==="y"?D.ymax-D.ymin:D.zmax-D.zmin);
+}
+/* Single place that decides which block a click selects, sets S.selBlock /
+   S.rangeSel, and repaints the selection highlight. */
+function selectBlockAt(ev){
+  if(!rangeGroup) return;
+  // Block selection is only active while the BLOCKS panel is open.
+  const w=$("blockwrap");
+  if(!w || w.style.display==="none") return;
+  // Prefer the block whose solid fill box the ray hits (only the fills, not the
+  // 3.5 cm-threshold edge lines, so no neighbouring block can win).
+  let key=null;
+  const fills=rangeGroup.children.filter(o=>o.userData&&o.userData.fill&&o.visible);
+  if(fills.length){
+    const bh=castAt(ev, fills);
+    if(bh&&bh.object.userData.rangeKey) key=bh.object.userData.rangeKey;
+  }
+  // If the boxes aren't shown, fall back to the block under the cursor on the
+  // car surface so selection still works.
+  if(!key){
+    const pickMesh=carPick||carMesh;
+    const h=pickMesh?castAt(ev,[pickMesh]):null;
+    if(h&&h.point){
+      const raw=blockAt(h.point);
+      if(findBlock(raw)) key=raw.join(",");
+    }
+  }
+  if(!key) return;                       // clicked nothing -> leave selection alone
+  if(key===S.rangeSel) return;           // already selected
+  S.rangeSel=key;
+  S.selBlock=key.split(",").map(Number);
+  renderBlockSel();
+  paintRangeSel();
+}
+/* Screen-space split picking: planes viewed edge-on have ~zero screen area, so
+   a ray almost never hits them. Project each plane's quad to the screen and
+   pick the one whose outline/area is within `px` pixels of the cursor. */
+function nearSplit(ev, px){
+  px = px||10;
+  const r=renderer.domElement.getBoundingClientRect();
+  const mx=ev.clientX-r.left, my=ev.clientY-r.top;
+  const v=new THREE.Vector3(), cp=new THREE.Vector3();
+  let best=null;
+  for(const g of planeGroup.children){
+    const pk=g.userData.pick; if(!pk||pk.kind!=="split") continue;
+    const m=g.children[0]; if(!m||!m.geometry||!m.geometry.parameters) continue;
+    m.updateWorldMatrix(true,false);
+    const w=m.geometry.parameters.width/2, h=m.geometry.parameters.height/2;
+    const P=[]; let ok=true;
+    for(const [cx,cy] of [[-w,-h],[w,-h],[w,h],[-w,h]]){
+      v.set(cx,cy,0).applyMatrix4(m.matrixWorld).project(camera);
+      if(!isFinite(v.x)||v.z>1||v.z<-1){ ok=false; break; }
+      P.push([(v.x+1)/2*r.width,(1-v.y)/2*r.height]);
+    }
+    if(!ok) continue;
+    // distance from cursor to quad (0 if inside)
+    let inside=false;
+    for(let i=0,j=3;i<4;j=i++){
+      const [xi,yi]=P[i],[xj,yj]=P[j];
+      if(((yi>my)!==(yj>my)) && (mx<(xj-xi)*(my-yi)/(yj-yi)+xi)) inside=!inside;
+    }
+    let d=Infinity;
+    if(inside) d=0;
+    else for(let i=0;i<4;i++){
+      const [ax,ay]=P[i],[bx,by]=P[(i+1)%4];
+      const dx=bx-ax, dy=by-ay, L2=dx*dx+dy*dy;
+      let t=L2?((mx-ax)*dx+(my-ay)*dy)/L2:0; t=Math.max(0,Math.min(1,t));
+      d=Math.min(d, Math.hypot(mx-(ax+t*dx), my-(ay+t*dy)));
+    }
+    if(d>px) continue;
+    cp.setFromMatrixPosition(g.matrixWorld);
+    const depth=cp.distanceTo(camera.position);
+    if(!best || d<best.d-1.5 || (Math.abs(d-best.d)<=1.5 && depth<best.depth)) best={group:g,d,depth};
+  }
+  return best;
+}
+function onMove(ev){
+  if(painting){
+    const key = markerHit(ev);
+    if(key!==null) paintBlock(key, paintState);
+    return;
+  }
+  if(zoomBandMove(ev)) return;
+  if(!dragging) return;
+  if(S.vertexTool==="slide"){ slideVertex(ev); return; }
+  if(!S.selected) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const ax = S.selected.axis;
+  const dv = (ax==="y" ? -ev.movementY : (ax==="z" ? -ev.movementX : ev.movementX)) * axisExtent(ax)/Math.max(r.width,1);
+  slideSelected(S.selected.value + dv);
+}
+function onUp(ev){
+  if(painting){
+    painting=false; controls.enabled=true; downXY=null;
+    refreshBlocks();
+    return;
+  }
+  if(zoomBandEnd(ev)) return;
+  if(rotationCenterPick){
+    const moved=downXY?Math.hypot(ev.clientX-downXY[0],ev.clientY-downXY[1]):Infinity;
+    downXY=null; controls.enabled=true;
+    if(moved<6){
+      const target=carPick||carMesh, hit=target?castAt(ev,[target]):null;
+      if(hit){ controls.target.copy(hit.point); controls.update(); setRotationCenterPick(false); log(`rotation centre set to (${hit.point.x.toFixed(3)}, ${hit.point.y.toFixed(3)}, ${hit.point.z.toFixed(3)})`); }
+      else log("no car surface at that point — click the car");
+    }
+    return;
+  }
+  if(S.tool!=="navigate"){ downXY=null; return; }
+  const wasDrag = dragging;
+  dragging=false; controls.enabled=true;
+  if(S.vertexTool){
+    if(S.vertexTool==="slide" && S._slidePt && S.vertexSel!==null) commitSlide();
+    downXY=null; downHit=null;
+    return;
+  }
+  if(!downXY) return;
+  const moved = Math.hypot(ev.clientX-downXY[0], ev.clientY-downXY[1]);
+  downXY=null; downHit=null;
+  if(moved>=6) {
+    if(wasDrag && S.selected){
+      const ax=S.selected.axis, L=S.splits[ax];
+      let nv=S.selected.value;
+      const di=(typeof S._dragIdx==="number")?S._dragIdx:-1;
+      // minimum gap: never coincide with a *different* split
+      const clash=L.some((v,idx)=>idx!==di && Math.abs(v-nv)<0.0025);
+      if(clash){
+        if(di>=0&&di<L.length) L[di]=S._dragFrom;
+        S.selected.value=S._dragFrom;
+        const _g=S._dragGroup||findPlaneGroup(ax);
+        if(_g){ _g.position[ax]=S._dragFrom; _g.userData.value=S._dragFrom; }
+        syncSplitVal(); refreshSelHL();
+        const _nv=$("newval");
+        if(_nv){ _nv.style.borderColor="#ff6b6b"; setTimeout(()=>{ _nv.style.borderColor=""; },900); }
+        log(`reverted: too close to another split (min gap 5 mm)`);
+      } else {
+        const pre=[...(S._dragList||L)].sort((a,b)=>a-b);
+        const rankPre=pre.filter(v=>v<S._dragFrom-1e-9).length;
+        S.splits[ax]=[...L].sort((a,b)=>a-b);
+        const rankPost=S.splits[ax].filter(v=>v<nv-1e-9).length;
+        if(rankPre!==rankPost && Object.keys(S.over).length){
+          S.over={};
+          log(`splits reordered past a neighbour — painted inside/outside overrides cleared (block numbers shifted)`);
+        }
+        if(Math.abs(nv-(S._dragFrom??nv))>1e-9) log(`moved ${ax} → ${nv.toFixed(3)}`);
+      }
+    }
+  clearPickInfo();
+    S._dragIdx=S._dragGroup=S._dragFrom=S._dragList=undefined;
+    renderRows(); modelChanged(); return;
+  }
+  clearPickInfo();
+  S._dragIdx=S._dragGroup=S._dragFrom=S._dragList=undefined;
+  const h = castAt(ev, pickables);
+  const _direct = h ? groupOf(h.object) : null;
+  const _dpk = _direct ? _direct.userData.pick : null;
+  const _ns = (_dpk && _dpk.kind==="split") ? null : nearSplit(ev);
+  if(!h && !_ns){ S.selected=null; renderSel(); rebuildPlanes(); return; }
+  const g = _ns ? _ns.group : _direct, pk = g ? g.userData.pick : null;
+  if(!pk) return;
+  if(pk.kind==="split"){ S.selected={axis:pk.axis,value:pk.value};
+    log(`selected ${pk.axis}=${Number(pk.value).toFixed(3)}`); }
+  else { S.clickPt={x:h.point.x,y:h.point.y,z:h.point.z};
+    showPickInfo(S.clickPt, nearestVertexTo(S.clickPt));
+    showPickInfo(S.clickPt, nearestVertexTo(S.clickPt));
+    log(`car point x=${h.point.x.toFixed(3)}, y=${h.point.y.toFixed(3)}, z=${h.point.z.toFixed(3)} — add buttons below Selection`); }
+  renderSel(); rebuildPlanes();
+}
+function slideSelected(nv){
+  // Free drag: clamp only to the domain. The dragged entry is tracked by
+  // index (S._dragIdx) so crossing a neighbour cannot corrupt it.
+  const ax=S.selected.axis, L=S.splits[ax];
+  let i=(typeof S._dragIdx==="number")?S._dragIdx:-1;
+  if(!(i>=0&&i<L.length)) i=L.findIndex(v=>Math.abs(v-S.selected.value)<1e-9);
+  if(i<0) return;
+  const D=S.domain;
+  const lo={x:D.xmin,y:D.ymin,z:D.zmin}[ax]+0.005;
+  const hi={x:D.xmax,y:D.ymax,z:D.zmax}[ax]-0.005;
+  nv=Math.min(hi,Math.max(lo,nv));
+  L[i]=nv; S.selected.value=nv;
+  const g=S._dragGroup||findPlaneGroup(ax);
+  if(g){ g.position[ax]=nv; g.userData.value=nv; }
+  syncSplitVal(); refreshSelHL();
+}
+function findPlaneGroup(ax){
+  if(!S.selected) return null;
+  for(const g of planeGroup.children){
+    const p=g.userData.pick;
+    if(p&&p.kind==="split"&&p.axis===ax&&Math.abs(p.value-S.selected.value)<1e-6) return g;
+  }
+  return null;
+}
+/* ---------------- splits panel ---------------- */
+function renderRows(){
+  const host=$("rows"); if(host) host.innerHTML="";
+}
+function findPlaneGroupByVal(ax,val){
+  for(const g of planeGroup.children){
+    const p=g.userData.pick;
+    if(p&&p.kind==="split"&&p.axis===ax&&Math.abs(p.value-val)<1e-6) return g;
+  }
+  return null;
+}
+document.querySelectorAll("#modeseg button").forEach(b=>{
+  b.onclick=()=>{
+    if(b.dataset.m===S.mode){ S.hidePlanes=!S.hidePlanes; }
+    else { S.mode=b.dataset.m; S.hidePlanes=false; }
+    paintMode(); renderRows(); rebuildPlanes(); renderSel(); };
+});
+function paintMode(){
+  document.querySelectorAll("#modeseg button").forEach(b=>{
+    b.className = (!S.hidePlanes&&b.dataset.m===S.mode) ? ("on"+b.dataset.m.toUpperCase()) : "";
+    if(S.mode==="all"&&!S.hidePlanes) document.querySelector("#modeseg [data-m=all]").className="onA";
+  });
+}
+document.querySelectorAll("#toolseg button").forEach(b=>{
+  b.onclick=()=>{ S.tool=b.dataset.t; paintTool(); };
+});
+function paintTool(){
+  document.querySelectorAll("#toolseg button").forEach(b=>{
+    const t=b.dataset.t;
+    b.className = t===S.tool ? (t==="navigate"?"onN":(t==="in"?"onI":"onO")) : "";
+  });
+}
+$("addbtn").onclick=()=>{
+  const btn=$("addbtn"), orig=btn.textContent;
+  const flash=m=>{ btn.textContent=m; setTimeout(()=>{ btn.textContent=orig; },900); };
+  const v=parseFloat($("newval").value);
+  const ax = S.mode==="all" ? "x" : S.mode;
+  const D=S.domain, lo={x:D.xmin,y:D.ymin,z:D.zmin}[ax], hi={x:D.xmax,y:D.ymax,z:D.zmax}[ax];
+  if(!(lo<v&&v<hi)){ flash("outside domain"); return; }
+  if(S.splits[ax].some(w=>Math.abs(w-v)<1e-9)){ flash("already present"); return; }
+  pushHist();
+  S.splits[ax].push(v); S.splits[ax].sort((a,b)=>a-b);
+  renderRows(); modelChanged(); flash(`added ${ax}`);
+};
+$("modsplitbtn").onclick=()=>{
+  // Move the currently selected split plane to the value in "Split value".
+  const btn=$("modsplitbtn"), orig=btn.textContent;
+  const flash=m=>{ btn.textContent=m; setTimeout(()=>{ btn.textContent=orig; },1200); };
+  if(!S.selected){ flash("select a plane first"); return; }
+  const nv=parseFloat($("newval").value);
+  if(!isFinite(nv)){ flash("enter a value"); return; }
+  const {axis,value}=S.selected, L=S.splits[axis], D=S.domain;
+  const lo={x:D.xmin,y:D.ymin,z:D.zmin}[axis], hi={x:D.xmax,y:D.ymax,z:D.zmax}[axis];
+  const i=L.findIndex(v=>Math.abs(v-value)<1e-9);
+  if(i<0){ flash("select a plane first"); return; }
+  if(i===0||i===L.length-1){ flash("can't move domain bound"); return; }
+  if(!(lo<nv&&nv<hi)){ flash("outside domain"); return; }
+  if(Math.abs(nv-value)<1e-9){ flash("no change"); return; }
+  if(L.some((v,idx)=>idx!==i&&Math.abs(v-nv)<0.0025)){ flash("too close to another split"); return; }
+  pushHist();
+  const preRank=L.filter(v=>v<value-1e-9).length;
+  L[i]=nv; S.splits[axis]=[...L].sort((a,b)=>a-b);
+  S.selected.value=nv;
+  const postRank=S.splits[axis].filter(v=>v<nv-1e-9).length;
+  if(preRank!==postRank&&Object.keys(S.over).length){ S.over={}; log("reordered — painted overrides cleared"); }
+  log(`moved ${axis} ${value.toFixed(3)} → ${nv.toFixed(3)}`);
+  renderRows(); modelChanged(); renderSel(); flash(`moved ${axis}`);
+};
+$("readbtn").onclick=async()=>{
+  const _b=busy($("readbtn"),true);
+  try{
+    const T=await api("/api/read_dict");
+    pushHist();
+    S.splits={x:[...T.x],y:[...T.y],z:[...T.z]};
+    S.domain={xmin:T.x[0],xmax:T.x[T.x.length-1],ymin:T.y[0],ymax:T.y[T.y.length-1],zmin:T.z[0],zmax:T.z[T.z.length-1]};
+    for(const [k,v] of [["dxmin",S.domain.xmin],["dxmax",S.domain.xmax],["dymin",S.domain.ymin],
+                        ["dymax",S.domain.ymax],["dzmin",S.domain.zmin],["dzmax",S.domain.zmax]])
+      $(k).value=v;
+    S.selected=null;
+    S.over={};
+    for(const t of (T.solid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=1;
+    for(const t of (T.fluid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=0;
+    renderRows(); modelChanged(); renderSel();
+    S.pins=(T.pins&&typeof T.pins==="object")?T.pins:{};
+    hideAllGreen();
+    log("splits restored from "+(T.source||"blockMeshDict"));
+  }finally{ busy(_b,false); }
+};
+/* ---------------- blockMeshDict / blockMesh / checkMesh ---------------- */
+function clearBadGroups(){ clearGroup(badGroup); clearGroup(nonGroup); clearGroup(skewGroup); clearGroup(pyrGroup); }
+function showBadCells(list, color, group){
+  if(!list || !list.length) return;
+  const P=[];
+  for(const c of list){
+    const p = Array.isArray(c) ? c : (c && c.c);
+    if(p && p.length===3) P.push(p[0],p[1],p[2]);
+  }
+  if(!P.length) return;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(P,3));
+  const m=new THREE.PointsMaterial({color:color, size:0.08, sizeAttenuation:true,
+                                    depthTest:false, transparent:true, opacity:0.95});
+  const o=new THREE.Points(g,m); o.renderOrder=900; group.add(o);
+}
+$("expbtn").onclick=async()=>{
+  const btn=$("expbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Writing…";
+  setStat("writing blockMeshDict…");
+  try{
+    const {so,fl}=overLists();
+    const body={x:S.splits.x, y:S.splits.y, z:S.splits.z, solid:so, fluid:fl};
+    if(S.pins) body.pins=S.pins;
+    const r=await api("/api/export",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    if(r.ok===false) throw new Error(tailMsg(r.log,2)||"exporter failed");
+    setStat("blockMeshDict written"); log(r.log||"blockMeshDict written");
+    await refreshBlocks();
+  }catch(e){ const m="export failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
+  finally{ busy(_b,false); btn.textContent=old; }
+};
+$("runbmbtn").onclick=async()=>{
+  const btn=$("runbmbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Running…";
+  setStat("blockMesh running…");
+  try{
+    const r=await api("/api/blockMesh",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:"{}"});
+    if(!r.ok) throw new Error(tailMsg(r.log,2)||"blockMesh failed");
+    setStat("blockMesh OK"); log(r.log||"blockMesh OK");
+    await refreshBlocks();
+  }catch(e){ const m="blockMesh failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
+  finally{ busy(_b,false); btn.textContent=old; }
+};
+/* Whole bad cell / face: translucent fill + outline. tri = flat xyz triangle list
+   from the server; falls back to centre points if no geometry came back. */
+function showBadTris(tri, color, group){
+  if(!tri || tri.length<9) return false;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(tri,3));
+  const fill=new THREE.Mesh(g, new THREE.MeshBasicMaterial({color:color, transparent:true,
+    opacity:0.55, side:THREE.DoubleSide, depthTest:false, depthWrite:false}));
+  fill.renderOrder=900; group.add(fill);
+  const eg=new THREE.EdgesGeometry(g, 1);
+  const edges=new THREE.LineSegments(eg, new THREE.LineBasicMaterial({color:color,
+    depthTest:false, transparent:true, opacity:1}));
+  edges.renderOrder=901; group.add(edges);
+  return true;
+}
+function showBad(tri, pts, color, group){
+  if(!showBadTris(tri, color, group)) showBadCells(pts, color, group);
+}
+function applyCheckResult(r){
+    clearBadGroups();
+    const T=r.tris||{};
+    showBad(T.cells,    r.cells,    0xff3b3b, badGroup);   // red
+    showBad(T.nonortho, r.nonortho, 0xff9a2e, nonGroup);   // orange
+    showBad(T.skew,     r.skew,     0x9dff8a, skewGroup);  // light green
+    showBad(T.pyramids, r.pyramids, 0x00e5ff, pyrGroup);   // cyan
+    if(r.geom_error) log("could not read mesh geometry, showing centre points: "+r.geom_error);
+    // per-check report; tick the visibility box of every check that found something
+    const iss=(r.issues&&r.issues.length)?r.issues:[
+      {key:"negvol",label:"negative volume cells",n:r.n_bad||0},
+      {key:"nonortho",label:"non-orthogonal faces (severe)",n:r.n_nonortho||0},
+      {key:"skew",label:"highly skew faces",n:r.n_skew||0},
+      {key:"pyramid",label:"face pyramid errors",n:r.n_pyramid||0}];
+    const ui={negvol:["shbad","shbadn"],nonortho:["shnon","shnonn"],
+              skew:["shskew","shskewn"],pyramid:["shpyr","shpyrn"]};
+    const lines=[], bad=[];
+    for(const it of iss){
+      const n=it.n||0, u=ui[it.key]||[];
+      if(u[1]&&$(u[1])) $(u[1]).textContent=n?`(${n})`:"(0)";
+      if(n>0 && u[0] && $(u[0])) $(u[0]).checked=true;
+      const mx=(it.max!==null&&it.max!==undefined&&isFinite(it.max))?` (max ${Number(it.max).toPrecision(4)})`:"";
+      lines.push(`${n>0?"✗":"✓"} ${n} ${it.label}${n>0?mx:""}`);
+      if(n>0) bad.push(`${n} ${it.label}`);
+    }
+    if($("checkstat")) $("checkstat").textContent=
+      (r.n_cells?`${r.n_cells} cells\n`:"")+lines.join("\n")+(r.mesh_ok?"\nMesh OK":"");
+    applyVis();
+    const nCells=r.n_cells||0;
+    const msg = bad.length
+      ? `${nCells} cells · ⚠ `+bad.join(" · ")
+      : `${nCells} cells · Mesh OK — no non-orthogonal, negative-volume, skew or face-pyramid problems`;
+    setStat(msg); log(r.log||msg);
+}
+$("chkmeshbtn").onclick=async()=>{
+  const btn=$("chkmeshbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Checking…";
+  setStat("checkMesh running…");
+  try{
+    const r=await api("/api/checkmesh",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:"{}"});
+    applyCheckResult(r);
+  }catch(e){ const m="checkMesh failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
+  finally{ busy(_b,false); btn.textContent=old; }
+};
+
+/* ---------------- mesh optimiser ---------------- */
+let _optTimer=null, _optSince=0, _optRunning=false, _optTrial="";
+function optAppend(lines){
+  const el=$("optlog"); if(!el||!lines||!lines.length) return;
+  el.style.display="block"; el.textContent+=lines.join("\n")+"\n"; el.scrollTop=el.scrollHeight;
+}
+function optSetBtn(on){
+  const b=$("optbtn"); if(!b) return;
+  b.classList.toggle("running",!!on);
+  b.textContent=on?"Optimising… (click to stop)":"Optimise mesh";
+}
+/* yellow = vertices being fixed now, green lines = where they are moved to */
+function optShowTargets(list){
+  clearGroup(optGroup);
+  if(!list||!list.length) return;
+  const P=[], Ls=[];
+  for(const t of list){
+    if(!t.from||!t.to) continue;
+    P.push(t.from[0],t.from[1],t.from[2]);
+    Ls.push(t.from[0],t.from[1],t.from[2],t.to[0],t.to[1],t.to[2]);
+  }
+  if(!P.length) return;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position",new THREE.Float32BufferAttribute(P,3));
+  const pts=new THREE.Points(g,new THREE.PointsMaterial({color:0xffe066,size:0.12,sizeAttenuation:true,
+    depthTest:false,transparent:true,opacity:0.95}));
+  pts.renderOrder=950; optGroup.add(pts);
+  const g2=new THREE.BufferGeometry();
+  g2.setAttribute("position",new THREE.Float32BufferAttribute(Ls,3));
+  const ln=new THREE.LineSegments(g2,new THREE.LineBasicMaterial({color:0x3fd68c,depthTest:false}));
+  ln.renderOrder=951; optGroup.add(ln);
+}
+async function optFinish(s){
+  _optRunning=false; clearTimeout(_optTimer); _optTimer=null;
+  optSetBtn(false); clearGroup(optGroup);
+  const btn=$("optbtn"); if(btn) btn.disabled=false;
+  if(s.error){ setStat("optimise failed: "+s.error); log("optimise failed: "+s.error); }
+  try{
+    const g=await api("/api/read_dict");
+    if(g&&g.pins&&typeof g.pins==="object") S.pins=g.pins;
+  }catch(e){}
+  try{
+    await _resyncDict();
+    hideAllGreen();
+    for(const [k,v] of Object.entries(S.pins||{})) showX("g",v,k);
+  }catch(e){ console.error(e); }
+  if(s.result){
+    applyCheckResult(s.result);
+    const m=(s.cancelled?"optimise stopped · ":"optimise finished · ")+($("glstat")?$("glstat").textContent:"");
+    setStat(m);
+  }
+}
+async function optPoll(){
+  if(!_optRunning) return;
+  let s=null;
+  try{ s=await api("/api/optimise/status?since="+_optSince); }
+  catch(e){ _optTimer=setTimeout(optPoll,2000); return; }
+  _optSince=s.n||_optSince;
+  optAppend(s.log);
+  if(s.trial!==_optTrial){ _optTrial=s.trial; optShowTargets(s.targets); }
+  if(s.running && s.message) setStat("optimise: "+s.message+(s.score!==null&&s.score!==undefined?` · score ${Number(s.score).toFixed(1)}`:""));
+  if(!s.running){ await optFinish(s); return; }
+  _optTimer=setTimeout(optPoll,1000);
+}
+$("optbtn").onclick=async()=>{
+  if(_optRunning){
+    try{ await api("/api/optimise/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); }catch(e){}
+    optAppend(["Stop requested - finishing the current trial, then restoring the best mesh…"]);
+    return;
+  }
+  const el=$("optlog"); if(el){ el.textContent=""; el.style.display="block"; }
+  _optSince=0; _optTrial="";
+  const iters=Math.max(1,Math.min(30,parseInt($("optiter").value)||6));
+  try{
+    const r=await api("/api/optimise/start",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({max_iter:iters,target:$("optsurf").value,max_verts:300})});
+    if(r.ok===false) throw new Error(r.error||"could not start");
+  }catch(e){
+    const m="optimise could not start: "+(e&&e.message?e.message:e);
+    setStat(m); optAppend([m]); return;
+  }
+  _optRunning=true; optSetBtn(true);
+  setStat("optimise: starting…");
+  _optTimer=setTimeout(optPoll,600);
+};
+/* re-attach if the page was reloaded while the optimiser is running */
+(async()=>{
+  try{
+    const s=await api("/api/optimise/status?since=0");
+    if(s&&s.running){
+      _optRunning=true; optSetBtn(true); optAppend(s.log); _optSince=s.n||0;
+      _optTimer=setTimeout(optPoll,800);
+    }
+  }catch(e){}
+})();
+$("modbtn").onclick=async()=>{
+  if(!S.selBlock){ log("select a block first"); return; }
+  const num=id=>{ const v=parseFloat($(id).value); return (isFinite(v)&&v>=1)?Math.min(200,Math.round(v)):null; };
+  const btn=$("modbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Modifying…";
+  try{
+    const r=await api("/api/modify",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({block:S.selBlock, nc:[num("bnx"),num("bny"),num("bnz")]})});
+    if(r.error) throw new Error(r.error);
+    if(r.ok===false) throw new Error(tailMsg(r.log,2)||"generator failed");
+    if(Array.isArray(r.nc)){
+      if($("bnx")) $("bnx").value=r.nc[0];
+      if($("bny")) $("bny").value=r.nc[1];
+      if($("bnz")) $("bnz").value=r.nc[2];
+    }
+    setStat("block cell counts updated"); log(r.log||"block cell counts updated");
+    await refreshBlocks(); renderBlockSel();
+  }catch(e){ const m="modify failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
+  finally{ busy(_b,false); btn.textContent=old; }
+};
+/* LIVE / DEAD — flip the selected block's state (dead = inside the car). */
+function _flipSelectedBlock(state){
+  const label = state ? "dead" : "live";
+  const b = S.selBlock ? findBlock(S.selBlock) : null;
+  if(!b){
+    const m="select a block first (open BLOCKS, then click one)";
+    setStat(m); log(m); return;
+  }
+  const key=b.k.join(",");
+  if(!!b.s === !!state){
+    const m=`block ${key} is already ${label}`;
+    setStat(m); log(m); return;
+  }
+  pushHist();
+  S.over[key] = state ? 1 : 0;
+  // Optimistic local update: flip S.blk immediately so the box recolours this
+  // frame, then confirm against the server. Without this the colour only
+  // changed after the /api/interface round-trip completed.
+  if(b) b.s = state ? 1 : 0;
+  const m=`block ${key} → ${label}`;
+  setStat(m);
+  buildRangeBoxes();
+  renderBlockSel(); paintRangeSel();
+  // Persist the staged overrides so a reload restores them.
+  const {so,fl}=overLists();
+  api("/api/saveover",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({solid:so, fluid:fl})}).catch(e=>log("saveover failed: "+(e&&e.message?e.message:e)));
+  Promise.resolve(refreshBlocks()).then(()=>{
+    buildRangeBoxes();
+    renderBlockSel(); paintRangeSel();
+  }).catch(e=>{ log("refresh failed: "+(e&&e.message?e.message:e)); });
+}
+$("livebtn").onclick=()=>_flipSelectedBlock(0);
+$("deadbtn").onclick=()=>_flipSelectedBlock(1);
+$("vishead").onclick=()=>{
+  const w=$("viswrap"), open=w.style.display!=="none";
+  w.style.display=open?"none":"";
+  $("vishead").innerHTML=open?"VISIBILITY &#9656;":"VISIBILITY &#9662;";
+};
+$("projhead").onclick=()=>{
+  const w=$("projwrap"), open=w.style.display!=="none";
+  w.style.display=open?"none":"";
+  $("projhead").innerHTML=open?"PROJECTION &#9656;":"PROJECTION &#9662;";
+};
+$("blockhead").onclick=()=>{
+  const w=$("blockwrap"), open=w.style.display!=="none";
+  w.style.display=open?"none":"";
+  $("blockhead").innerHTML=open?"BLOCKS &#9656;":"BLOCKS &#9662;";
+  if(!open){
+    // block boxes must be on screen while editing, or flips look like no-ops
+    if($("shface") && !$("shface").checked){ $("shface").checked=true; applyVis(); buildRangeBoxes(); }
+  }
+  paintRangeSel();
+};
+$("splithead").onclick=()=>{
+  const w=$("splitwrap"), open=w.style.display!=="none";
+  w.style.display=open?"none":"";
+  $("splithead").innerHTML=open?"SPLITS &#9656;":"SPLITS &#9662;";
+};
+$("domhead").onclick=()=>{
+  const w=$("domwrap"), open=w.style.display!=="none";
+  w.style.display=open?"none":"";
+  $("domhead").innerHTML=open?"DOMAIN &#9656;":"DOMAIN &#9662;";
+};
+$("domapply").onclick=()=>{
+  S.domain={xmin:+$("dxmin").value,xmax:+$("dxmax").value,ymin:+$("dymin").value,
+            ymax:+$("dymax").value,zmin:+$("dzmin").value,zmax:+$("dzmax").value};
+  for(const ax of ["x","y","z"]){
+    const lo={x:S.domain.xmin,y:S.domain.ymin,z:S.domain.zmin}[ax];
+    const hi={x:S.domain.xmax,y:S.domain.ymax,z:S.domain.zmax}[ax];
+    S.splits[ax]=[lo,hi,...S.splits[ax].filter(v=>lo<v&&v<hi)];
+  }
+  S.over={}; modelChanged(); log("domain applied (overrides cleared)");
+};
+$("opac").oninput=e=>{
+  S.opacity=parseFloat(e.target.value);
+  planeGroup.traverse(o=>{ if(o.material&&o.material.transparent) o.material.opacity=S.opacity; });
+};
+if($("shclip")) $("shclip").onchange=()=>rebuildPlanes();
+if($("clipm")) $("clipm").onchange=()=>rebuildPlanes();
+for(const id of ["shstl","shsdf","shbox"])
+  $(""+id).onchange=()=>{ applyVis(); };
+$("shface").onchange=()=>{
+  applyVis();
+  if($("shface").checked) buildRangeBoxes();
+};
+if($("shcell")) $("shcell").onchange=()=>{
+  const v=$("shcell").checked;
+  if(v) refreshBlocks(); else for(const o of cellGroup.children){ if(o.userData.cellLines) o.visible=false; }
+};
+if($("shedge")) $("shedge").onchange=()=>{
+  const v=$("shedge").checked;
+  for(const o of projGroup.children){ if(o.userData.hl) o.visible=v; }
+  applyVis();
+};
+if($("shmesh")) $("shmesh").onchange=()=>{
+  const v=$("shmesh").checked;
+  meshGroup.visible=v;
+  if($("shhide")) $("shhide").disabled=false;
+  if(v) refreshProjectedMesh();
+  applyVis();
+};
+if($("shbad")) $("shbad").onchange=()=>{
+  badGroup.visible=$("shbad").checked;
+  applyVis();
+};
+if($("shnon")) $("shnon").onchange=()=>{
+  nonGroup.visible=$("shnon").checked;
+  applyVis();
+};
+if($("shskew")) $("shskew").onchange=()=>{
+  skewGroup.visible=$("shskew").checked;
+  applyVis();
+};
+if($("shpyr")) $("shpyr").onchange=()=>{
+  pyrGroup.visible=$("shpyr").checked;
+  applyVis();
+};
+if($("shhide")) $("shhide").onchange=()=>{
+  if($("shhide").checked) ensureHide();
+  applyVis();
+};
+function applyVis(){
+  if(carMesh) carMesh.visible=$("shstl")&&$("shstl").checked;
+  if(sdfMesh) sdfMesh.visible=$("shsdf")&&$("shsdf").checked;
+  boxGroup.visible=$("shbox").checked;
+  blkGroup.visible=false; // block-centre markers removed
+  ifaceGroup.visible=false;
+  rangeGroup.visible=$("shface").checked;
+  const _shf=!!($("shface")&&$("shface").checked);
+  if(blkHiFill) blkHiFill.visible=_shf;
+  if(blkHiEdge) blkHiEdge.visible=_shf;
+  selGroup.visible=$("shface").checked;
+  meshGroup.visible=$("shmesh")&&$("shmesh").checked;
+  badGroup.visible=!!($("shbad")&&$("shbad").checked);
+  nonGroup.visible=!!($("shnon")&&$("shnon").checked);
+  skewGroup.visible=!!($("shskew")&&$("shskew").checked);
+  pyrGroup.visible=!!($("shpyr")&&$("shpyr").checked);
+  if(hideMesh) hideMesh.visible=$("shhide").checked&&(( $("shmesh")&&$("shmesh").checked)||($("shedge")&&$("shedge").checked));
+  projGroup.visible=true;
+  const _onEd = !$("shedge") || $("shedge").checked;
+  for(const o of projGroup.children){ if(o.userData.hl) o.visible=_onEd; }
+}
+function syncSplitVal(){
+  const el=$("newval"); if(!el) return;
+  if(S.selected && isFinite(S.selected.value)) el.value=Number(S.selected.value).toFixed(3);
+}
+function renderSel(){
+  const box=$("selcard"); if(!box){ syncSplitVal(); renderClickPt(); refreshSelHL(); return; }
+  if(!S.selected){ box.className="none";
+    box.innerHTML='<span class="mut">Click a plane border (or the car to add). Drag a selected plane to move it.</span>';
+    renderClickPt(); refreshSelHL(); return; }
+  const {axis,value}=S.selected;
+  box.className="";
+  box.innerHTML=`<b style="color:yellow">${axis} = ${value.toFixed(3)}</b>
+    <div class="btnrow"><input type="number" id="selnum" step="0.005" value="${value.toFixed(3)}"
+      style="flex:2;min-width:0;background:#12151c;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 10px">
+    <button class="btn ghost" id="selset">Set</button>
+    <button class="btn ghost" id="selnudge-">−</button>
+    <button class="btn ghost" id="selnudge+">+</button></div>
+    <div class="btnrow"><button class="btn ghost" id="selproj">Project face</button>
+    <button class="btn danger" id="seldel">Delete</button></div>
+    <div id="selstat" class="stat"></div>`;
+  const applySelNum=()=>{
+    const el=$("selnum");
+    if(!el) return;
+    let nv=parseFloat(el.value);
+    if(!isFinite(nv)) return;
+    const D=S.domain, L=S.splits[axis];
+    const lo={x:D.xmin,y:D.ymin,z:D.zmin}[axis]+0.005;
+    const hi={x:D.xmax,y:D.ymax,z:D.zmax}[axis]-0.005;
+    nv=Math.min(hi,Math.max(lo,nv));
+    const i=L.findIndex(v=>Math.abs(v-value)<1e-9);
+    if(i<0) return;
+    if(L.some((v,idx)=>idx!==i&&Math.abs(v-nv)<0.0025)){ log("too close to another split (min gap 5 mm)"); return; }
+    const preRank=L.filter(v=>v<value-1e-9).length;
+    L[i]=nv; S.splits[axis]=[...L].sort((a,b)=>a-b);
+    S.selected.value=nv;
+    const postRank=S.splits[axis].filter(v=>v<nv-1e-9).length;
+    if(preRank!==postRank&&Object.keys(S.over).length){ S.over={}; log("reordered — painted overrides cleared"); }
+    log(`set ${axis} → ${nv.toFixed(3)}`);
+    renderRows(); modelChanged(); renderSel();
+  };
+  $("selset").onclick=applySelNum;
+  $("selnudge-").onclick=()=>{ const el=$("selnum"); el.value=(parseFloat(el.value)-0.01).toFixed(3); applySelNum(); };
+  $("selnudge+").onclick=()=>{ const el=$("selnum"); el.value=(parseFloat(el.value)+0.01).toFixed(3); applySelNum(); };
+  if($("selproj")) $("selproj").onclick=()=>updateProjection();
+  $("seldel").onclick=()=>{
+    const L=S.splits[axis];
+    const i=L.findIndex(v=>Math.abs(v-value)<1e-9);
+    if(i>0&&i<L.length-1){ L.splice(i,1); log(`deleted ${axis}=${value.toFixed(3)}`); }
+    else log("cannot delete a domain bound");
+    S.selected=null; renderRows(); modelChanged(); renderSel();
+  };
+  renderClickPt();
+  refreshSelHL();
+}
+/* ---------------- clicked car point: sync split value only (no panel) ---------------- */
+function renderClickPt(){
+  const xyz = S.clickPt;
+  if(!xyz || typeof xyz.x !== "number") return;
+  const _nv=$("newval");
+  if(_nv){ const _axm = S.mode==="all"?"x":S.mode;
+    _nv.value=Number(xyz[{x:"x",y:"y",z:"z"}[_axm]]).toFixed(3); }
+}
+/* Persistent pick readout: every click shows the world xyz; when a vertex is
+   in range it also shows the vertex number, its grid index (i,j,k) and whether
+   it carries a projection. Lives in #pickinfo (unlike #glstat, it does not
+   clear on the next log line). */
+function clearPickInfo(){ const el=$("pickinfo"); if(el) el.innerHTML=""; }
+document.addEventListener("pointerdown",ev=>{ const v=$("view"); if(v&&!v.contains(ev.target)) clearPickInfo(); });
+/* Block geometry restored from /api/interface. */
+let showMode = "dead";
+function findBlock(key){
+  const id=Array.isArray(key)?key.join(","):String(key);
+  return (S.blk||[]).find(b=>Array.isArray(b.k)&&b.k.join(",")===id)||null;
+}
+function buildRangeBoxes(){
+  clearGroup(rangeGroup);
+  const edges=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  for(const b of (S.blk||[])){
+    if(!Array.isArray(b.box)||b.box.length!==8) continue;
+    const p=[];
+    for(const [a,c] of edges) p.push(...b.box[a],...b.box[c]);
+    const g=new THREE.BufferGeometry();
+    g.setAttribute("position",new THREE.Float32BufferAttribute(p,3));
+    const o=new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:b.s?0xff5555:0x4c8dff,transparent:true,opacity:0.75}));
+    o.userData.rangeKey=b.k.join(",");
+    const hg=new THREE.BufferGeometry();
+    const hp=[]; for(const q of b.box) hp.push(...q);
+    hg.setAttribute("position",new THREE.Float32BufferAttribute(hp,3));
+    hg.setIndex([0,2,1,0,3,2,4,5,6,4,6,7,0,1,5,0,5,4,1,2,6,1,6,5,2,3,7,2,7,6,3,0,4,3,4,7]);
+    hg.computeVertexNormals();
+    const fill=new THREE.Mesh(hg,new THREE.MeshBasicMaterial(
+      {color:b.s?0xff5555:0x4c8dff,transparent:true,opacity:b.s?0.30:0.22,
+       side:THREE.DoubleSide,depthWrite:false,toneMapped:false}));
+    fill.userData.rangeKey=b.k.join(",");
+    fill.userData.fill=true;
+    fill.renderOrder=5;
+    rangeGroup.add(fill);
+    rangeGroup.add(o);
+  }
+  paintRangeSel();
+}
+/* Filled + outlined highlight for the selected block. */
+let blkHiFill=null, blkHiEdge=null;
+function _killBlockHi(){
+  if(blkHiFill){ scene.remove(blkHiFill); blkHiFill.geometry.dispose(); blkHiFill.material.dispose(); blkHiFill=null; }
+  if(blkHiEdge){ scene.remove(blkHiEdge); blkHiEdge.geometry.dispose(); blkHiEdge.material.dispose(); blkHiEdge=null; }
+}
+function drawBlockHi(key){
+  _killBlockHi();
+  const b=key?findBlock(key):null;
+  if(!b||!Array.isArray(b.box)||b.box.length!==8) return;
+  if(!blockPassesShowMode(b)) return;   // never outline a filtered-out block
+  const c=b.box;
+  const idx=[0,2,1,0,3,2,4,5,6,4,6,7,0,1,5,0,5,4,1,2,6,1,6,5,2,3,7,2,7,6,3,0,4,3,4,7];
+  const pos=[];
+  for(const i of idx) pos.push(...c[i]);
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos,3));
+  g.computeVertexNormals();
+  blkHiFill=new THREE.Mesh(g, new THREE.MeshBasicMaterial(
+    {color:0x39c8ff, transparent:true, opacity:0.35, side:THREE.DoubleSide,
+     depthWrite:false, depthTest:false, toneMapped:false}));
+  blkHiFill.renderOrder=940;
+  const ed=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  const ep=[]; for(const [a,d] of ed) ep.push(...c[a],...c[d]);
+  const eg=new THREE.BufferGeometry();
+  eg.setAttribute("position", new THREE.Float32BufferAttribute(ep,3));
+  blkHiEdge=new THREE.LineSegments(eg, new THREE.LineBasicMaterial(
+    {color:0xffffff, depthTest:false, transparent:true, opacity:1, toneMapped:false}));
+  blkHiEdge.renderOrder=960;
+  // The selection highlight is always shown — independent of the "blocks"
+  // visibility checkbox — so a selected block is never invisible.
+  blkHiFill.visible=true; blkHiEdge.visible=true;
+  scene.add(blkHiFill); scene.add(blkHiEdge);
+}
+function blockPassesShowMode(b){
+  if(!b) return false;
+  if(showMode==="dead") return !!b.s;
+  if(showMode==="live") return !b.s;
+  const axes=["i","j","k"];
+  return b.k.every((v,i)=>{
+    const lo=$("r"+axes[i]+"0"),hi=$("r"+axes[i]+"1");
+    return v>=(lo?Number(lo.value):0)&&v<=(hi?Number(hi.value):Infinity);
+  });
+}function paintRangeSel(){
+  const bounds={};
+  for(const a of ["i","j","k"]){
+    const axis={i:"x",j:"y",k:"z"}[a], max=Math.max(0,(S.splits[axis]||[]).length-2);
+    const lo=$("r"+a+"0"), hi=$("r"+a+"1");
+    bounds[a]=[lo?Number(lo.value):0,hi?Number(hi.value):max];
+  }
+  for(const o of rangeGroup.children){
+    const key=o.userData.rangeKey, b=findBlock(key);
+    o.visible=blockPassesShowMode(b);
+    const dead=!!(b&&b.s);
+    o.material.color.set(dead?0xff5555:0x4c8dff);
+    // translucent fills stay faint, the outline edges stay crisp
+    o.material.opacity = o.userData.fill ? (dead?0.30:0.22) : (dead?0.90:0.75);
+  }
+  const seg=$("showseg");
+  if(seg) for(const btn of seg.querySelectorAll("button")) btn.classList.toggle("onA",btn.dataset.s===showMode);
+  // If the selected block is hidden by the current filter, drop the selection
+  // so we never outline (or keep selected) a block that isn't on screen.
+  if(S.rangeSel){
+    const sb=findBlock(S.rangeSel);
+    if(sb && !blockPassesShowMode(sb)){
+      S.rangeSel=null; S.selBlock=null; renderBlockSel();
+    }
+  }
+  drawBlockHi(S.rangeSel);
+}
+function syncRangeSliders(){
+  for(const a of ["i","j","k"]){
+    const axis={i:"x",j:"y",k:"z"}[a], max=Math.max(0,(S.splits[axis]||[]).length-2);
+    const lo=$("r"+a+"0"), hi=$("r"+a+"1");
+    if(!lo||!hi) continue;
+    const oldLo=Number(lo.value),oldHi=Number(hi.value), initialized=lo.dataset.ready==="1";
+    lo.min=hi.min=0; lo.max=hi.max=max;
+    if(!initialized){lo.value=0;hi.value=max;lo.dataset.ready=hi.dataset.ready="1";}
+    else {lo.value=Math.min(max,oldLo);hi.value=Math.max(Number(lo.value),Math.min(max,oldHi));}
+    const label=$("rlab"+a); if(label) label.textContent=`${a}: ${lo.value} – ${hi.value} / ${max}`;
+  }
+  paintRangeSel();
+}
+for(const btn of document.querySelectorAll("#showseg button")) btn.addEventListener("click",()=>{
+  showMode=btn.dataset.s;
+  // make sure the boxes exist, then repaint the filter
+  if(!rangeGroup.children.length) buildRangeBoxes(); else paintRangeSel();
+});
+for(const id of ["ri0","ri1","rj0","rj1","rk0","rk1"]) $(id).addEventListener("input",()=>{
+  const a=id[1],lo=$("r"+a+"0"),hi=$("r"+a+"1");
+  if(Number(lo.value)>Number(hi.value)){if(id.endsWith("0"))hi.value=lo.value;else lo.value=hi.value;}
+  paintRangeSel();
+});/* Recovered fallbacks for helpers lost with the truncated script tail. */
+/* Keep every X marker the same size on screen and facing the camera. */
+function sizeXMarks(){
+  if(!xGroup || !xGroup.children.length || !camera) return;
+  const h = viewH || (renderer && renderer.domElement ? renderer.domElement.clientHeight : 0)
+            || window.innerHeight || 900;
+  const halfPx = 6.5;
+  /* Ortho cameras have no fov; use the vertical world extent instead, or the
+     old formula produced NaN and the marker vanished. */
+  const isOrtho = !!camera.isOrthographicCamera;
+  const worldPerPx = isOrtho
+    ? (camera.top - camera.bottom) / Math.max(1e-9, camera.zoom) / Math.max(h,1)
+    : 2*Math.tan(((camera.fov||45)*Math.PI/180)/2)/Math.max(h,1);
+  for(const o of xGroup.children){
+    if(!o.position) continue;
+    o.quaternion.copy(camera.quaternion);
+    const px = (o.userData && o.userData.px) ? o.userData.px : halfPx;
+    const d = isOrtho ? 1 : camera.position.distanceTo(o.position);
+    o.scale.setScalar(Math.max(1e-9, d*worldPerPx*px));
+  }
+}
+
+function renderBlockSel(){
+  const el=$("blksel"); if(el) el.textContent="";
+  ["bnx","bny","bnz"].forEach(id=>{const q=$(id);if(q)q.value="";});
+  const b=S.selBlock?findBlock(S.selBlock):null;
+  if(!b||!b.nc) return;
+  ["bnx","bny","bnz"].forEach((id,i)=>{const q=$(id);if(q)q.value=b.nc[i];});
+}
+/* ---- vertex-projection markers (X marks) ---- */
+let _xGeo=null;
+function _xGeom(){
+  if(!_xGeo){
+    _xGeo=new THREE.BufferGeometry();
+    _xGeo.setAttribute("position", new THREE.Float32BufferAttribute(
+      [-1,-1,0, 1,1,0,  -1,1,0, 1,-1,0], 3));
+  }
+  return _xGeo;
+}
+function _mkX(color){
+  const m=new THREE.LineBasicMaterial({color:color, depthTest:false, depthWrite:false,
+                                       transparent:true, opacity:1});
+  m.toneMapped=false;
+  const o=new THREE.LineSegments(_xGeom(), m);
+  o.renderOrder=1000;
+  o.userData.isX=true;
+  o.userData.px = (color===0xffffff) ? 9 : halfXpxDefault();
+  xGroup.add(o);
+  return o;
+}
+function halfXpxDefault(){ return 6.5; }
+function _dropX(o){
+  if(!o) return;
+  xGroup.remove(o);
+  if(o.material&&o.material.dispose) o.material.dispose();
+}
+const _xGreen=new Map();
+let _surfIds=null;
+let _xSel=null, _xWhite=null;
+function showX(kind, pos, key){
+  if(kind==="w"){
+    _dropX(_xWhite); _xWhite=null;
+    if(pos&&pos.length===3){ _xWhite=_mkX(0xffffff); _xWhite.position.set(pos[0],pos[1],pos[2]); }
+    return;
+  }
+  if(kind!=="g") return;
+  if(key!==undefined&&key!==null){
+    const id=String(key), old=_xGreen.get(id);
+    if(!pos||pos.length!==3){ _dropX(old); if(old) _xGreen.delete(id); return; }
+    const m=old||_mkX(0x3fd68c);
+    if(!old) _xGreen.set(id,m);
+    m.position.set(pos[0],pos[1],pos[2]);
+    return;
+  }
+  _dropX(_xSel); _xSel=null;
+  if(pos&&pos.length===3){ _xSel=_mkX(0x3fd68c); _xSel.position.set(pos[0],pos[1],pos[2]); }
+}
+function hideAllGreen(){
+  for(const m of _xGreen.values()) _dropX(m);
+  _xGreen.clear();
+  _dropX(_xSel); _xSel=null;
+}
+/* ---- dict vertex lookup ---- */
+function _surfaceIds(){
+  if(_surfIds) return _surfIds;
+  const f=(S.faceProj&&S.faceProj.faceIndices)||[];
+  if(!f.length) return null;
+  const out=new Set();
+  for(const t of f){
+    if(Array.isArray(t)){
+      for(const i of t) if(Number.isInteger(i)&&i>=0) out.add(i);
+    } else if(Number.isInteger(t)&&t>=0) out.add(t);
+  }
+  _surfIds = out.size ? [...out] : null;
+  return _surfIds;
+}
+function _dist2(a,b){ const dx=a[0]-b.x, dy=a[1]-b.y, dz=a[2]-b.z; return dx*dx+dy*dy+dz*dz; }
+function nearestVertexTo(pt){
+  if(!pt||!S.dictVerts||!S.dictVerts.length) return null;
+  const ids=_surfaceIds(); let best=null, bd=Infinity;
+  if(ids){
+    for(const i of ids){ const p=S.dictVerts[i]; if(!p) continue;
+      const d=_dist2(p,pt); if(d<bd){ bd=d; best=i; } }
+    return best;
+  }
+  for(let i=0;i<S.dictVerts.length;i++){ const p=S.dictVerts[i]; if(!p) continue;
+    const d=_dist2(p,pt); if(d<bd){ bd=d; best=i; } }
+  return best;
+}
+function pickVertex(ev){
+  if(!ev||!S.dictVerts||!S.dictVerts.length||!camera||!renderer) return null;
+  const r=renderer.domElement.getBoundingClientRect();
+  const cx=ev.clientX-r.left, cy=ev.clientY-r.top;
+  const ids=_surfaceIds()||S.dictVerts.map((_,i)=>i);
+  const v=new THREE.Vector3();
+  let best=null, bestD=20*20;
+  for(const i of ids){
+    const p=S.dictVerts[i]; if(!p) continue;
+    v.set(p[0],p[1],p[2]).project(camera);
+    if(v.z>1) continue;
+    const sx=(v.x*0.5+0.5)*r.width, sy=(-v.y*0.5+0.5)*r.height;
+    const dx=sx-cx, dy=sy-cy, d=dx*dx+dy*dy;
+    if(d<bestD){ bestD=d; best=i; }
+  }
+  if(best!==null) return best;
+  /* No vertex marker within the snap radius: the user clicked the car body.
+     Snap to the nearest blockMeshDict surface vertex of the hit point, so a
+     click anywhere on the shell still selects (and marks) a vertex. */
+  const target=carPick||carMesh;
+  if(target){
+    const h=castAt(ev,[target]);
+    if(h&&h.point){ const n=nearestVertexTo(h.point); if(n!==null) return n; }
+  }
+  const fp=rayFallbackPoint(ev);
+  return fp ? nearestVertexTo(fp) : null;
+}
+/* ---- dict-grid id -> "x|y|z" pin key ---- */
+function pinKey(vid){
+  const g=S.dictGrid;
+  if(!g||!g.x||!g.y||!g.z||!Number.isInteger(vid)||vid<0) return "";
+  const nx=g.x.length-1, ny=g.y.length-1;
+  const i=vid%(nx+1), j=Math.floor(vid/(nx+1))%(ny+1), k=Math.floor(vid/((nx+1)*(ny+1)));
+  if(g.x[i]===undefined||g.y[j]===undefined||g.z[k]===undefined) return "";
+  return `${g.x[i]}|${g.y[j]}|${g.z[k]}`;
+}
+/* ---- persistent pick readout ---- */
+function showPickInfo(pt, vidx){
+  const el=$("pickinfo"); if(!el) return;
+  if(!pt||typeof pt.x!=="number"){ el.innerHTML=""; return; }
+  const f=n=>Number(n).toFixed(3);
+  let h=`<span class="mut">xyz</span> <b>${f(pt.x)}, ${f(pt.y)}, ${f(pt.z)}</b>`;
+  if(vidx!==null&&vidx!==undefined){
+    const k=pinKey(vidx);
+    h+=` &nbsp;<span class="mut">vertex</span> <b>${vidx}</b>`;
+    if(k) h+=` <span class="mut">(grid ${k})</span>`;
+    h += (k&&S.pins&&S.pins[k])
+      ? ` &nbsp;<span style="color:#3fd68c">projection</span>`
+      : ` &nbsp;<span class="mut">no projection</span>`;
+  }
+  el.innerHTML=h;
+}
+async function updateProjection(){
+  const btn=$("updproj");
+  if(!btn||btn.disabled) return;
+  const old=btn.textContent; btn.disabled=true; btn.classList.add("busy"); btn.textContent="Projecting…";
+  setStat("reading blockMeshDict surface vertices…");
+  try{
+    const wall=await api("/api/dictwall");
+    if(wall.drift) throw new Error(wall.drift_msg||"blockMeshDict grid differs from the loaded splits; export the current grid first");
+    const verts=wall.verts||[], faces=wall.fidx||[];
+    const ids=[...new Set(faces.flat().filter(i=>Number.isInteger(i)&&i>=0&&i<verts.length))];
+    if(!ids.length) throw new Error("no body or wheel surface vertices were found in blockMeshDict");
+    const nx=Number(wall.nx), ny=Number(wall.ny), xs=wall.x||[],ys=wall.y||[],zs=wall.z||[];
+    if(!Number.isInteger(nx)||!Number.isInteger(ny)||!xs.length||!ys.length||!zs.length)
+      throw new Error("blockMeshDict is missing its grid index data");
+    const points=ids.map(i=>verts[i]);
+    setStat(`projecting ${ids.length} surface vertices onto the distance field…`);
+    const projected=await api("/api/project",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({points})});
+    if(!Array.isArray(projected.points)||projected.points.length!==ids.length) throw new Error("distance-field projection returned an incomplete result");
+    const pins={...(S.pins||{})};
+    for(let n=0;n<ids.length;n++){
+      const id=ids[n], i=id%(nx+1), j=Math.floor(id/(nx+1))%(ny+1), k=Math.floor(id/((nx+1)*(ny+1)));
+      if(xs[i]===undefined||ys[j]===undefined||zs[k]===undefined) continue;
+      pins[`${xs[i]}|${ys[j]}|${zs[k]}`]=projected.points[n];
+    }
+    setStat("writing projected vertices to blockMeshDict…");
+    const saved=await api("/api/pinpatch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pins})});
+    S.pins=pins;
+    const updated=await api("/api/dictwall");
+    S.dictVerts=updated.verts||[];
+    S.dictGrid={x:updated.x,y:updated.y,z:updated.z};
+    S.faceProj={faceIndices:updated.fidx||[],curves:updated.curves||[],curveIds:updated.curveIds||[],bands:[]};
+    S.projDirty=false;
+    refreshSelHL();
+    for(const [key,value] of Object.entries(S.pins)) showX("g",value,key);
+    const count=Number(saved.patched)||0;
+    const stats=projected.stats||{};
+    const msg=`projection updated: ${count} vertices`+(stats.mean_mm!==undefined?`, mean move ${Number(stats.mean_mm).toFixed(2)} mm`:"");
+    setStat(msg); log(msg);
+  }catch(e){
+    const msg="projection failed: "+(e&&e.message?e.message:String(e));
+    setStat(msg); log(msg); console.error(msg,e);
+  }finally{btn.disabled=false;btn.classList.remove("busy");btn.textContent=old;}
+}
+$("updproj").onclick=()=>updateProjection();
+/* Re-read the wall from blockMeshDict so curved edges / quads follow the
+   vertex that just moved, then redraw the edge overlay. */
+async function _resyncDict(){
+  const vs=S.vertexSel;
+  if(await loadDictSurface()){
+    refreshSelHL();
+    if(vs!==null&&vs!==undefined){
+      const p=_vertexPos(vs);
+      if(p){ showX("w",p); showPickInfo(p,vs); }
+    }
+  }
+}
+/* Put the selected vertex at `pos`, persist it, and mark it with a green X.
+   Returns false (and reverts) if the server refuses the pin. */
+async function _applyVertexPin(pos, msg){
+  if(S.vertexSel===null||S.vertexSel===undefined){ setStat("select a vertex first"); return false; }
+  const vid=S.vertexSel, k=pinKey(vid);
+  if(!k){ setStat("vertex has no grid key"); return false; }
+  if(!pos||pos.length!==3||!pos.every(Number.isFinite)){ setStat("invalid target position"); return false; }
+  pushHist();
+  const prevPin=S.pins[k]?[...S.pins[k]]:null;
+  const prevPos=S.dictVerts[vid]?[...S.dictVerts[vid]]:null;
+  S.pins[k]=[pos[0],pos[1],pos[2]];
+  if(S.dictVerts[vid]) S.dictVerts[vid]=S.pins[k];
+  showX("w",S.pins[k]);
+  showX("g",S.pins[k], "slide");
+  showPickInfo(S.pins[k], vid);
+  refreshSelHL();
+  let r=null;
+  try{
+    r=await api("/api/pinpatch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({pins:S.pins})});
+  }catch(e){
+    log("pin write failed: "+(e&&e.message?e.message:e));
+    setStat("pin write failed: "+(e&&e.message?e.message:e));
+    return false;
+  }
+  if(r&&Array.isArray(r.vetoed)&&r.vetoed.includes(k)){
+    // outer-domain boundary vertex over live blocks: must stay flat
+    if(prevPin) S.pins[k]=prevPin; else delete S.pins[k];
+    if(prevPos) S.dictVerts[vid]=prevPos;
+    refreshSelHL();
+    showX("w",_vertexPos(vid)); showX("g",null,"slide");
+    setStat("vertex lies on the outer domain boundary — it must stay flat, so it was not moved");
+    return false;
+  }
+  S.projDirty=true;
+  await _resyncDict();
+  if(msg) setStat(msg);
+  return true;
+}
+/* Snap the selected vertex to the closest point of a surface.
+   target "stl"    = the car STL (true geometry)      -> Nearest surface
+   target "smooth" = the smooth distance-field mesh   -> Smooth surface */
+async function _snapSelected(btnId, busyLabel, target, what){
+  if(S.vertexSel===null||S.vertexSel===undefined){ setStat("select a vertex first"); return; }
+  const btn=$(btnId), _b=busy(btn,true), old=btn.textContent;
+  btn.textContent=busyLabel;
+  try{
+    const cur=_vertexPos(S.vertexSel);
+    if(!cur) throw new Error("vertex position unknown");
+    const r=await api("/api/snap",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({points:[cur],target})});
+    const p=(r.points||[])[0];
+    if(!Array.isArray(p)||p.length!==3||!p.every(Number.isFinite)) throw new Error("no surface point returned");
+    const mm=Number((r.dist_mm||[0])[0]||0);
+    await _applyVertexPin(p, `${what}: moved ${mm.toFixed(1)} mm onto the surface`);
+  }catch(e){
+    const m=`${what} failed: `+(e&&e.message?e.message:e);
+    setStat(m); log(m);
+  }finally{ busy(_b,false); btn.textContent=old; }
+}
+$("nearbtn").onclick=()=>_snapSelected("nearbtn","Projecting…","stl","nearest surface");
+$("smoothbtn").onclick=()=>_snapSelected("smoothbtn","Snapping…","smooth","smooth surface");
+/* Undo projection: drop the selected vertex's pin and put the dict vertex back
+   on its block corner (server recomputes the un-projected grid point). */
+$("undopbtn").onclick=async()=>{
+  if(S.vertexSel===null||S.vertexSel===undefined){ setStat("select a vertex first"); return; }
+  const btn=$("undopbtn"), _b=busy(btn,true), vid=S.vertexSel;
+  try{
+    const k=pinKey(vid);
+    pushHist();
+    if(k) delete S.pins[k];
+    const r=await api("/api/unpin",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({key:k,vid:vid})});
+    if(r&&Array.isArray(r.point)&&r.point.length===3&&S.dictVerts[vid]) S.dictVerts[vid]=r.point;
+    await _resyncDict();
+    showX("g",null,"slide");
+    S.projDirty=true;
+    setStat("projection undone — vertex back at block corner");
+  }catch(e){
+    const m="undo projection failed: "+(e&&e.message?e.message:e);
+    setStat(m); log(m);
+  }finally{ busy(_b,false); }
+};
+$("sdfbtn").onclick=async()=>{
+  const btn=$("sdfbtn");
+  if(!btn||btn.disabled) return;
+  const sizeEl=$("sdfsize");
+  const cm=parseFloat(sizeEl?sizeEl.value:"");
+  if(!(cm>=1&&cm<=10)){
+    const m="distance-field grid size must be between 1 and 10 cm";
+    setStat(m); log(m); return;
+  }
+  const old=btn.textContent;
+  const _b=busy(btn,true); btn.textContent="Building…";
+  setStat(`building distance field using a grid size of ${cm} cm — this can take a minute…`);
+  log(`building distance field, grid size ${cm} cm`);
+  try{
+    const resp=await fetch("/api/sdf/build",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({spacing_cm:cm})});
+    const r=await resp.json().catch(()=>({}));
+    if(!resp.ok||r.error) throw new Error(r.error||("HTTP "+resp.status));
+    await loadSdfSurface();
+    if($("shsdf")) $("shsdf").checked=true;
+    applyVis();
+    const grid=r.shape_xyz?(" · resolution "+r.shape_xyz):"";
+    const msg=`distance field rebuilt, grid size ${cm} cm${grid}`;
+    setStat(msg); log(msg);
+  }catch(e){
+    const msg="distance field failed: "+(e&&e.message?e.message:String(e));
+    setStat(msg); log(msg); console.error(msg,e);
+  }finally{ busy(_b,false); btn.textContent=old; }
+};
+async function loadSdfSurface(){
+  const j = await api("/api/sdfsurface");
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(j.positions, 3));
+  g.setIndex(j.index);
+  g.computeVertexNormals();
+  g.computeBoundingSphere();
+  /* The distance field is an *additional* surface: it must not replace the
+     STL geometry (carMesh), the full-res pick mesh (carPick) or the hidden-line
+     occluder (hideMesh) — all of which are loaded first at startup. */
+  if(sdfMesh){ scene.remove(sdfMesh); sdfMesh.geometry.dispose(); sdfMesh.material.dispose(); }
+  sdfMesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({
+    color:0x2ee89a, roughness:0.32, metalness:0.08,
+    emissive:0x0c3b2c, emissiveIntensity:1.0,
+    side:THREE.DoubleSide, flatShading:false,
+    transparent:true, opacity:0.45, depthWrite:false }));
+  sdfMesh.userData.pick = {kind:"car"};
+  sdfMesh.renderOrder=4;
+  sdfMesh.visible = $("shsdf") ? $("shsdf").checked : true;
+  scene.add(sdfMesh);
+  refreshPick();
+}
+/* Load the surface vertex grid from system/blockMeshDict so Select/Slide/etc.
+   have something to pick. Needed at startup — previously only "Update
+   projection" fetched it, so clicking the car never selected a vertex. */
+async function loadDictSurface(){
+  try{
+    const w = await api("/api/dictwall");
+    S.dictVerts = w.verts || [];
+    S.dictGrid = {x:w.x||[], y:w.y||[], z:w.z||[]};
+    S.faceProj = {faceIndices:w.fidx||[], curves:w.curves||[],
+                  curveIds:w.curveIds||[], bands:[]};
+    _surfIds=null;
+    return true;
+  }catch(e){ log("blockMeshDict surface unavailable: "+(e&&e.message?e.message:e)); return false; }
+}
+/* ---------------- vertex tools ---------------- */
+function _vertexToolBtn(id){ return $(id); }
+function setVertexTool(tool){
+  S.vertexTool = (S.vertexTool===tool) ? null : tool;
+  for(const [id,t] of [["selcbtn","select"],["sldcbtn","slide"]]){
+    const b=$(id); if(b) b.classList.toggle("onA", S.vertexTool===t);
+  }
+  if(tool==="select" && S.vertexTool==="select")
+    setStat(S.dictVerts.length ? "select: click a surface vertex" : "no surface vertices in blockMeshDict");
+  if(!S.vertexTool) { S.vertexSel=null; showX("w",null); }
+  else if(S.vertexTool==="slide") setStat("slide: drag the selected vertex");
+}
+$("selcbtn").onclick=()=>setVertexTool("select");
+$("sldcbtn").onclick=()=>setVertexTool("slide");
+(async function startPage(){
+  try {
+    const tables = await api("/api/tables");
+    S.tables = tables;
+    S.domain = tables.domain || S.domain;
+    const savedGrid = await api("/api/read_dict");
+    if (savedGrid && savedGrid.x && savedGrid.y && savedGrid.z) {
+      S.splits = {x:[...savedGrid.x], y:[...savedGrid.y], z:[...savedGrid.z]};
+      // Restore saved DEAD/LIVE block states and vertex pins so a reload shows
+      // exactly what was written to blockMeshDict.
+      S.over = {};
+      for(const t of (savedGrid.solid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=1;
+      for(const t of (savedGrid.fluid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=0;
+      if(savedGrid.pins && typeof savedGrid.pins==="object") S.pins = savedGrid.pins;
+    } else {
+      S.splits = tables.tuned || S.splits;
+    }
+    syncRangeSliders();
+    initGL();
+    window.addEventListener("resize", resize);
+    setStat("ready · loading model data…");
+    await loadCar(6);
+    await loadDictSurface();
+    applyVis();
+    rebuildPlanes();
+    renderRows();
+    await refreshBlocks();
+    setStat("ready · loading distance-field surface…");
+    loadSdfSurface().then(()=>setStat("ready · distance-field surface"))
+      .catch(e=>{ console.error("Distance-field surface load failed:",e); setStat("ready · STL fallback (distance-field unavailable)"); });
+  } catch (e) {
+    console.error("Blocksplit startup failed:", e);
+    setStat("startup error: " + (e && e.message ? e.message : e));
+  }
+})();
+</script>
+</body>
+</html>
