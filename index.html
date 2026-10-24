@@ -1625,9 +1625,9 @@ function showBadCells(list, color, group){
   if(!P.length) return;
   const g=new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.Float32BufferAttribute(P,3));
-  const m=new THREE.PointsMaterial({color:color, size:0.08, sizeAttenuation:true,
+  const m=new THREE.PointsMaterial({color:color, size:9, sizeAttenuation:false,
                                     depthTest:false, transparent:true, opacity:0.95});
-  const o=new THREE.Points(g,m); o.renderOrder=900; group.add(o);
+  const o=new THREE.Points(g,m); o.renderOrder=902; o.frustumCulled=false; group.add(o);
 }
 $("expbtn").onclick=async()=>{
   const btn=$("expbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Writing…";
@@ -1677,7 +1677,31 @@ function showBadTris(tri, color, group){
   return true;
 }
 function showBad(tri, pts, color, group){
-  if(!showBadTris(tri, color, group)) showBadCells(pts, color, group);
+  showBadTris(tri, color, group);      // whole cell / face, true size
+  showBadCells(pts, color, group);     // + a fixed-size dot so tiny ones are never lost
+}
+/* Fly the camera to a group of problem cells/faces. */
+function zoomToGroup(G){
+  const box=new THREE.Box3(); let any=false;
+  G.updateWorldMatrix(true,true);
+  for(const o of G.children){
+    const b=new THREE.Box3().setFromObject(o);
+    if(!b.isEmpty()){ box.union(b); any=true; }
+  }
+  if(!any) return false;
+  const c=box.getCenter(new THREE.Vector3()), r=Math.max(box.getSize(new THREE.Vector3()).length()/2, 0.15);
+  const off=camera.position.clone().sub(controls.target);
+  if(off.length()<1e-6) off.set(0,0,1);
+  controls.target.copy(c);
+  if(camera.isOrthographicCamera){
+    camera.zoom=Math.max(0.1,Math.min(200,(camera.top-camera.bottom)/(2*r*1.5)));
+    camera.updateProjectionMatrix();
+    camera.position.copy(c).add(off);
+  } else {
+    camera.position.copy(c).add(off.setLength(r*1.5/Math.tan(camera.fov*Math.PI/360)));
+  }
+  controls.update();
+  return true;
 }
 function applyCheckResult(r){
     clearBadGroups();
@@ -1695,13 +1719,16 @@ function applyCheckResult(r){
       {key:"pyramid",label:"face pyramid errors",n:r.n_pyramid||0}];
     const ui={negvol:["shbad","shbadn"],nonortho:["shnon","shnonn"],
               skew:["shskew","shskewn"],pyramid:["shpyr","shpyrn"]};
+    const grp={negvol:badGroup,nonortho:nonGroup,skew:skewGroup,pyramid:pyrGroup};
     const lines=[], bad=[];
     for(const it of iss){
       const n=it.n||0, u=ui[it.key]||[];
-      if(u[1]&&$(u[1])) $(u[1]).textContent=n?`(${n})`:"(0)";
+      const drawn=(grp[it.key]&&grp[it.key].children.length>0);
+      if(u[1]&&$(u[1])) $(u[1]).textContent=n?(drawn?`(${n}) ⌖`:`(${n})`):"(0)";
       if(n>0 && u[0] && $(u[0])) $(u[0]).checked=true;
       const mx=(it.max!==null&&it.max!==undefined&&isFinite(it.max))?` (max ${Number(it.max).toPrecision(4)})`:"";
-      lines.push(`${n>0?"✗":"✓"} ${n} ${it.label}${n>0?mx:""}`);
+      const tag=n>0?(it.src==="computed"?" · located from mesh geometry":"")+(drawn?"":" · ⚠ not drawn"):"";
+      lines.push(`${n>0?"✗":"✓"} ${n} ${it.label}${n>0?mx:""}${tag}`);
       if(n>0) bad.push(`${n} ${it.label}`);
     }
     const notes=(r.notes||[]).concat(r.geom_error?["could not read mesh geometry: "+r.geom_error]:[]);
@@ -1957,6 +1984,17 @@ if($("shnon")) $("shnon").onchange=()=>{
   nonGroup.visible=$("shnon").checked;
   applyVis();
 };
+for(const [sid,gid,cid] of [["shbadn","bad","shbad"],["shnonn","non","shnon"],["shskewn","skew","shskew"],["shpyrn","pyr","shpyr"]]){
+  const el=$(sid); if(!el) continue;
+  el.style.cursor="pointer"; el.title="click to zoom to these";
+  el.onclick=(ev)=>{
+    ev.preventDefault(); ev.stopPropagation();
+    const G={bad:badGroup,non:nonGroup,skew:skewGroup,pyr:pyrGroup}[gid];
+    if($(cid)) $(cid).checked=true;
+    applyVis();
+    if(!zoomToGroup(G)) setStat("nothing to zoom to - no cells/faces were drawn for this check");
+  };
+}
 if($("shskew")) $("shskew").onchange=()=>{
   skewGroup.visible=$("shskew").checked;
   applyVis();

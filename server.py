@@ -890,6 +890,109 @@ def _backup_dict():
         pass
 
 
+def _mesh_quality_arrays(P, offs, flat, owner, nei, chunk=400000):
+    """OpenFOAM-style mesh quality straight from polyMesh geometry.
+    Returns dict: angle (non-orthogonality in degrees, internal faces),
+    skew (all faces), pyr_bad (bool, all faces), vol (cell volumes),
+    fC (face centres), cC (cell centres)."""
+    import numpy as np
+    nf = len(offs) - 1
+    ni = len(nei)
+    sizes = np.diff(offs)
+    fC = np.zeros((nf, 3))
+    fA = np.zeros((nf, 3))
+    groups = []
+    for n in np.unique(sizes):
+        ids_all = np.nonzero(sizes == n)[0]
+        for s in range(0, len(ids_all), chunk):
+            groups.append((int(n), ids_all[s:s + chunk]))
+    for n, ids in groups:
+        V = P[flat[offs[ids][:, None] + np.arange(n)[None, :]]]          # (m,n,3)
+        if n == 3:
+            fC[ids] = V.mean(axis=1)
+            fA[ids] = 0.5 * np.cross(V[:, 1] - V[:, 0], V[:, 2] - V[:, 0])
+            continue
+        est = V.mean(axis=1)
+        Vn = np.roll(V, -1, axis=1)
+        nrm = np.cross(Vn - V, est[:, None, :] - V)                     # (m,n,3)
+        a = np.linalg.norm(nrm, axis=2)
+        sumA = a.sum(axis=1)
+        sumAc = (a[:, :, None] * (V + Vn + est[:, None, :])).sum(axis=1)
+        good = sumA > 1e-150
+        fC[ids] = est
+        fC[ids[good]] = sumAc[good] / (3.0 * sumA[good])[:, None]
+        fA[ids] = 0.5 * nrm.sum(axis=1)
+    nc = int(max(owner.max(initial=-1), nei.max(initial=-1))) + 1
+    cEst = np.zeros((nc, 3))
+    cnt = np.zeros(nc)
+    np.add.at(cEst, owner, fC)
+    np.add.at(cnt, owner, 1.0)
+    if ni:
+        np.add.at(cEst, nei, fC[:ni])
+        np.add.at(cnt, nei, 1.0)
+    cEst /= np.maximum(cnt, 1.0)[:, None]
+    pyr_o = np.einsum("ij,ij->i", fA, fC - cEst[owner])
+    vol3 = np.zeros(nc)
+    cs = np.zeros((nc, 3))
+    np.add.at(vol3, owner, pyr_o)
+    np.add.at(cs, owner, pyr_o[:, None] * (0.75 * fC + 0.25 * cEst[owner]))
+    pyr_n = np.zeros(0)
+    if ni:
+        pyr_n = np.einsum("ij,ij->i", fA[:ni], cEst[nei] - fC[:ni])
+        np.add.at(vol3, nei, pyr_n)
+        np.add.at(cs, nei, pyr_n[:, None] * (0.75 * fC[:ni] + 0.25 * cEst[nei]))
+    ok = np.abs(vol3) > 1e-300
+    cC = cEst.copy()
+    cC[ok] = cs[ok] / vol3[ok][:, None]
+    vol = vol3 / 3.0
+    # non-orthogonality (internal faces)
+    d = cC[nei] - cC[owner[:ni]] if ni else np.zeros((0, 3))
+    dn = np.linalg.norm(d, axis=1) * np.linalg.norm(fA[:ni], axis=1)
+    cosv = np.einsum("ij,ij->i", d, fA[:ni]) / np.maximum(dn, 1e-300)
+    angle = np.degrees(np.arccos(np.clip(cosv, -1.0, 1.0)))
+    # skewness (internal + boundary faces)
+    Cpf = fC - cC[owner]
+    dd = np.zeros((nf, 3))
+    dd[:ni] = d
+    if nf > ni:
+        nb = fA[ni:] / np.maximum(np.linalg.norm(fA[ni:], axis=1), 1e-300)[:, None]
+        dd[ni:] = nb * np.einsum("ij,ij->i", nb, Cpf[ni:])[:, None]
+    rvs = 1e-150
+    sv = Cpf - (np.einsum("ij,ij->i", fA, Cpf)
+                / (np.einsum("ij,ij->i", fA, dd) + rvs))[:, None] * dd
+    svn = np.linalg.norm(sv, axis=1)
+    svHat = sv / (svn + rvs)[:, None]
+    fd = np.where(np.arange(nf) < ni, 0.2, 0.4) * np.linalg.norm(dd, axis=1) + 1e-300
+    for n, ids in groups:
+        V = P[flat[offs[ids][:, None] + np.arange(n)[None, :]]]
+        proj = np.abs(np.einsum("mnk,mk->mn", V - fC[ids][:, None, :], svHat[ids]))
+        fd[ids] = np.maximum(fd[ids], proj.max(axis=1))
+    skew = svn / fd
+    # face pyramids: apex (cell centre) must lie on the inner side of every face
+    pyr_bad = np.zeros(nf, dtype=bool)
+    pyr_bad |= (pyr_o / 3.0) <= 1e-15
+    if ni:
+        pyr_bad[:ni] |= (pyr_n / 3.0) <= 1e-15
+    return {"angle": angle, "skew": skew, "pyr_bad": pyr_bad, "vol": vol,
+            "fC": fC, "cC": cC}
+
+
+def _mesh_quality():
+    """Problem elements computed from constant/polyMesh itself:
+    {"neg": cells, "nonortho": faces (>70 deg), "skew": faces (>4), "pyr": faces}."""
+    import numpy as np
+    pd = os.path.join(CASE, "constant", "polyMesh")
+    P = _read_points(os.path.join(pd, "points"))
+    offs, flat = _read_faces(os.path.join(pd, "faces"))
+    owner = np.array(_read_label_list(os.path.join(pd, "owner")), dtype=np.int64)
+    nei = np.array(_read_label_list(os.path.join(pd, "neighbour")), dtype=np.int64)
+    q = _mesh_quality_arrays(P, offs, flat, owner, nei)
+    return {"neg": [int(i) for i in np.nonzero(q["vol"] < 1e-300)[0]],
+            "nonortho": [int(i) for i in np.nonzero(q["angle"] > 70.0)[0]],
+            "skew": [int(i) for i in np.nonzero(q["skew"] > 4.0)[0]],
+            "pyr": [int(i) for i in np.nonzero(q["pyr_bad"])[0]]}
+
+
 def _mesh_geometry():
     """(face_centroids, cell_centres, owner) of constant/polyMesh, read directly
     (no postProcess needed)."""
@@ -961,6 +1064,31 @@ def _checkmesh_run():
     skf = _set(names["skew"])         # faces (highly skew)
     pyf = _set(names["pyramids"])     # faces (error in face pyramids)
     notes = []
+    computed = set()
+    # checkMesh only writes a set for some failures (e.g. a face set for severely
+    # non-orthogonal faces is NOT written while they are just a warning). When the
+    # log reports a problem but there is no set, work the faces out from the mesh.
+    nonortho_max = _flt(r"Mesh non-orthogonality Max:\s*([-+.\deE]+)")
+    skew_max = _flt(r"Max skewness\s*=\s*([-+.\deE]+)")
+    want_neg = bool(_num(r"negative volume cells:\s*(\d+)")) and not idx
+    want_non = bool(_num(r"severely non-orthogonal[^\n]*:\s*(\d+)")
+                    or (nonortho_max and nonortho_max > 70.0)) and not nof
+    want_skw = bool(_num(r"(\d+)\s+highly skew faces detected")
+                    or (skew_max and skew_max > 4.0)) and not skf
+    want_pyr = bool(_num(r"(?i)error in face pyramids:\s*(\d+)")) and not pyf
+    if want_neg or want_non or want_skw or want_pyr:
+        try:
+            qm = _mesh_quality()
+            if want_neg and qm["neg"]:
+                idx = qm["neg"]; computed.add("negvol")
+            if want_non and qm["nonortho"]:
+                nof = qm["nonortho"]; computed.add("nonortho")
+            if want_skw and qm["skew"]:
+                skf = qm["skew"]; computed.add("skew")
+            if want_pyr and qm["pyr"]:
+                pyf = qm["pyr"]; computed.add("pyramid")
+        except Exception as e:
+            notes.append("could not work out the problem faces from the mesh: " + repr(e))
     cells, nonortho, skew, pyramids = [], [], [], []
     tris, geom_error = {}, None
     if idx or nof or skf or pyf:
@@ -999,14 +1127,18 @@ def _checkmesh_run():
             log.strip().splitlines()[-2:]))
     issues = [
         {"key": "negvol", "label": "negative volume cells",
-         "n": n_bad, "max": _flt(r"Minimum negative volume:\s*([-+.\deE]+)")},
+         "n": n_bad, "max": _flt(r"Minimum negative volume:\s*([-+.\deE]+)"),
+         "src": "computed" if "negvol" in computed else "set"},
         {"key": "nonortho", "label": "non-orthogonal faces (severe)",
          "n": n_nonortho,
-         "max": _flt(r"Mesh non-orthogonality Max:\s*([-+.\deE]+)")},
+         "max": _flt(r"Mesh non-orthogonality Max:\s*([-+.\deE]+)"),
+         "src": "computed" if "nonortho" in computed else "set"},
         {"key": "skew", "label": "highly skew faces",
-         "n": n_skew, "max": _flt(r"Max skewness\s*=\s*([-+.\deE]+)")},
+         "n": n_skew, "max": _flt(r"Max skewness\s*=\s*([-+.\deE]+)"),
+         "src": "computed" if "skew" in computed else "set"},
         {"key": "pyramid", "label": "face pyramid errors",
-         "n": n_pyr, "max": None},
+         "n": n_pyr, "max": None,
+         "src": "computed" if "pyramid" in computed else "set"},
     ]
     return ({"ok": True,
                        "log": "\n".join(log.strip().splitlines()[-30:]),
