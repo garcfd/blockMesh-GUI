@@ -581,13 +581,24 @@ def _snap_tris(target):
 
 
 def snap_points(P, target):
-    """Nearest point on the target surface for each row of P."""
+    """Nearest point on the target surface for each row of P (exact; triangles
+    are pruned with bounding spheres so large meshes stay fast)."""
     import numpy as np
     A, B, C = _snap_tris(target)
+    key = "cr_" + target
+    if key not in _snap_cache:
+        cen = (A + B + C) / 3.0
+        r = np.maximum.reduce([np.linalg.norm(A - cen, axis=1),
+                               np.linalg.norm(B - cen, axis=1),
+                               np.linalg.norm(C - cen, axis=1)])
+        _snap_cache[key] = (cen, r)
+    cen, r = _snap_cache[key]
     out = np.empty_like(P)
     dist = np.empty(len(P))
     for n in range(len(P)):
-        q = _closest_on_tris(P[n], A, B, C)
+        d = np.linalg.norm(cen - P[n], axis=1)
+        cand = np.nonzero(d - r <= (d + r).min())[0]
+        q = _closest_on_tris(P[n], A[cand], B[cand], C[cand])
         d2 = ((q - P[n]) ** 2).sum(axis=1)
         k = int(np.argmin(d2))
         out[n] = q[k]
@@ -879,14 +890,41 @@ def _backup_dict():
         pass
 
 
+def _mesh_geometry():
+    """(face_centroids, cell_centres, owner) of constant/polyMesh, read directly
+    (no postProcess needed)."""
+    import numpy as np
+    pd = os.path.join(CASE, "constant", "polyMesh")
+    P = _read_points(os.path.join(pd, "points"))
+    offs, flat = _read_faces(os.path.join(pd, "faces"))
+    owner = np.array(_read_label_list(os.path.join(pd, "owner")), dtype=np.int64)
+    nei = np.array(_read_label_list(os.path.join(pd, "neighbour")), dtype=np.int64)
+    cnt = np.diff(offs)
+    fc = np.add.reduceat(P[flat], offs[:-1], axis=0) / np.maximum(cnt, 1)[:, None]
+    nc = int(max(owner.max(initial=-1), nei.max(initial=-1))) + 1
+    sums = np.zeros((nc, 3))
+    n = np.zeros(nc)
+    np.add.at(sums, owner, fc[:len(owner)])
+    np.add.at(n, owner, 1.0)
+    if len(nei):
+        np.add.at(sums, nei, fc[:len(nei)])
+        np.add.at(n, nei, 1.0)
+    return fc, sums / np.maximum(n, 1.0)[:, None], owner
+
+
 def _checkmesh_run():
-    """Run checkMesh -writeSets on the current constant/polyMesh and return the
-    result dict served by /api/checkmesh (counts, issues, problem locations)."""
+    """Run checkMesh on the current constant/polyMesh and return the result dict
+    served by /api/checkmesh (counts, issues, problem locations and geometry)."""
     import re as _re
+    # OpenFOAM 12 wants "-writeSets <format>"; older/other builds take a bare flag
+    # or none at all. Try them in turn; the bad-element sets are written anyway.
     code, log = run(["bash", "-lc",
                      "source /opt/openfoam12/etc/bashrc; "
                      f"cd {CASE}; rm -rf constant/polyMesh/sets; "
-                     "checkMesh -writeSets 2>&1"], timeout=900)
+                     "out=$(checkMesh -writeSets vtk 2>&1) "
+                     "|| out=$(checkMesh -writeSets 2>&1) "
+                     "|| out=$(checkMesh 2>&1); echo \"$out\""], timeout=900)
+
     def _num(pat):
         m = _re.search(pat, log)
         return int(m.group(1)) if m else 0
@@ -900,54 +938,65 @@ def _checkmesh_run():
     mesh_ok = (("Mesh OK" in log) and ("Failed" not in log)
                and "Error in face pyramids" not in log)
     setdir = os.path.join(CASE, "constant", "polyMesh", "sets")
+    # Set names: believe what checkMesh says it wrote, else the usual names.
+    names = {"cells": "zeroVolumeCells", "nonortho": "nonOrthoFaces",
+             "skew": "skewFaces", "pyramids": "wrongOrientedFaces"}
+    for _n, desc, nm in _re.findall(
+            r"Writing\s+(\d+)\s+([^\n]*?)\s+to set\s+(\w+)", log):
+        d = desc.lower()
+        if "zero" in d or "negative" in d or "volume" in d:
+            names["cells"] = nm
+        elif "non-orth" in d or "nonorth" in d:
+            names["nonortho"] = nm
+        elif "skew" in d:
+            names["skew"] = nm
+        elif "orient" in d or "pyramid" in d:
+            names["pyramids"] = nm
 
     def _set(name):
         _q = os.path.join(setdir, name)
         return _read_cell_set(_q) if os.path.exists(_q) else []
-    idx = _set("zeroVolumeCells")      # cells (negative / zero volume)
-    nof = _set("nonOrthoFaces")        # faces (severely non-orthogonal)
-    skf = _set("skewFaces")            # faces (highly skew)
-    pyf = _set("wrongOrientedFaces")   # faces (error in face pyramids)
+    idx = _set(names["cells"])        # cells (negative / zero volume)
+    nof = _set(names["nonortho"])     # faces (severely non-orthogonal)
+    skf = _set(names["skew"])         # faces (highly skew)
+    pyf = _set(names["pyramids"])     # faces (error in face pyramids)
+    notes = []
     cells, nonortho, skew, pyramids = [], [], [], []
-    if idx or nof or skf or pyf:
-        run(["bash", "-lc",
-             "source /opt/openfoam12/etc/bashrc; "
-             f"cd {CASE}; postProcess -func writeCellCentres 2>&1 "
-             "| tail -n 2"], timeout=900)
-        C = _read_cell_centres(os.path.join(CASE, "constant", "C"))
-        cells = [{"i": int(i), "c": C[i]}
-                 for i in idx if 0 <= i < len(C)]
-        if nof or skf or pyf:
-            owner = _read_label_list(os.path.join(
-                CASE, "constant", "polyMesh", "owner"))
-
-            def _faces(fl):
-                # a face is shown at the centre of its owner cell
-                return [{"i": int(f), "c": C[owner[f]]}
-                        for f in fl
-                        if 0 <= f < len(owner) and 0 <= owner[f] < len(C)]
-            nonortho = _faces(nof)
-            skew = _faces(skf)
-            pyramids = _faces(pyf)
-        for _f in ("C", "Ccx", "Ccy", "Ccz"):
-            try:
-                os.remove(os.path.join(CASE, "constant", _f))
-            except OSError:
-                pass
     tris, geom_error = {}, None
     if idx or nof or skf or pyf:
         try:
+            fc, cc, owner = _mesh_geometry()
+            cells = [{"i": int(i), "c": [float(v) for v in cc[i]]}
+                     for i in idx if 0 <= i < len(cc)]
+
+            def _faces(fl):
+                return [{"i": int(f), "c": [float(v) for v in fc[f]]}
+                        for f in fl if 0 <= f < len(fc)]
+            nonortho, skew, pyramids = _faces(nof), _faces(skf), _faces(pyf)
+        except Exception as e:
+            geom_error = "locations: " + repr(e)
+        try:
             tris = _problem_tris(idx, nof, skf, pyf)
         except Exception as e:
-            geom_error = repr(e)
-    n_cells = (_num(r"\b(\d+)\s+cells\b")
-               or _num(r"(?m)^\s*cells:\s*(\d+)\s*$"))
+            geom_error = (geom_error + "; " if geom_error else "") + "geometry: " + repr(e)
+    n_cells = (_num(r"(?m)^\s*cells:\s*(\d+)\s*$")
+               or _num(r"(?m)^\s*cells\s*[:=]\s*(\d+)"))
     # Counts: trust checkMesh's own log line, fall back to the set size.
     n_bad = _num(r"negative volume cells:\s*(\d+)") or len(idx)
     n_nonortho = (_num(r"severely non-orthogonal[^\n]*:\s*(\d+)")
                   or len(nof))
     n_skew = _num(r"(\d+)\s+highly skew faces detected") or len(skf)
     n_pyr = (_num(r"(?i)error in face pyramids:\s*(\d+)") or len(pyf))
+    for _n, _lst, _nm, _lab in ((n_bad, idx, names["cells"], "negative-volume cells"),
+                                (n_nonortho, nof, names["nonortho"], "non-orthogonal faces"),
+                                (n_skew, skf, names["skew"], "highly skew faces"),
+                                (n_pyr, pyf, names["pyramids"], "face pyramid errors")):
+        if _n and not _lst:
+            notes.append("checkMesh reports %d %s but set '%s' was not written/read - "
+                         "nothing to display" % (_n, _lab, _nm))
+    if not _re.search(r"Mesh OK|Failed \d+ mesh checks|\bcells:", log):
+        notes.append("checkMesh output not recognised - see the log: " + " | ".join(
+            log.strip().splitlines()[-2:]))
     issues = [
         {"key": "negvol", "label": "negative volume cells",
          "n": n_bad, "max": _flt(r"Minimum negative volume:\s*([-+.\deE]+)")},
@@ -974,7 +1023,8 @@ def _checkmesh_run():
                        "skew": skew,
                        "pyramids": pyramids,
                        "tris": tris,
-                       "geom_error": geom_error})
+                       "geom_error": geom_error,
+                       "notes": notes})
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +1037,7 @@ _opt = {"running": False, "cancel": False, "done": False, "log": [], "iter": 0,
         "message": "", "result": None, "error": None, "cancelled": False}
 _OPT_BLOCKED = ("/api/pinpatch", "/api/unpin", "/api/export", "/api/blockMesh",
                 "/api/checkmesh", "/api/modify", "/api/saveover", "/api/savepins",
-                "/api/interface", "/api/sdf/build")
+                "/api/interface", "/api/interface_edges", "/api/sdf/build")
 
 
 def _opt_running():
@@ -1068,6 +1118,7 @@ def _write_vertices(moves):
            + "\n" + txt[m.end(1):])
     with open(dp, "w") as f:
         f.write(txt)
+    _refresh_interface_edges(set(moves))       # edges follow the moved vertices
     sp = os.path.join(SYS, "splits.json")
     try:
         cur = json.load(open(sp))
@@ -1161,11 +1212,239 @@ def _propose(verts, ids, nbr, relax, target):
     return snapped, np.linalg.norm(snapped - P, axis=1)
 
 
+def _surface_normals(P, target):
+    """Smoothed unit surface normal at the closest surface point of each row of P
+    (average of nearby triangle normals, sign-aligned). Orientation is arbitrary."""
+    import numpy as np
+    A, B, C = _snap_tris(target)
+    key = "cent_" + target
+    if key not in _snap_cache:
+        cen = (A + B + C) / 3.0
+        n3 = np.cross(B - A, C - A)
+        n3 = n3 / np.maximum(np.linalg.norm(n3, axis=1), 1e-30)[:, None]
+        e = np.linalg.norm(B[:2000] - A[:2000], axis=1)
+        _snap_cache[key] = (cen, n3, float(np.median(e)) if len(e) else 1.0)
+    cen, n3, med = _snap_cache[key]
+    out = np.zeros_like(P)
+    for n in range(len(P)):
+        q = _closest_on_tris(P[n], A, B, C)
+        k = int(np.argmin(((q - P[n]) ** 2).sum(axis=1)))
+        near = np.nonzero(np.linalg.norm(cen - q[k], axis=1) < 3.0 * med)[0]
+        if k not in near:
+            near = np.append(near, k)
+        sgn = np.sign(n3[near] @ n3[k])
+        sgn[sgn == 0] = 1.0
+        v = (n3[near] * sgn[:, None]).sum(axis=0)
+        ln = np.linalg.norm(v)
+        out[n] = v / ln if ln > 1e-12 else n3[k]
+    return out
+
+
+def _hex_adjacency():
+    """{vertex: set(vertices joined to it by a block edge)} over the live blocks."""
+    txt = open(os.path.join(SYS, "blockMeshDict")).read()
+    m = re.search(r"blocks\s*\(\s*(.*?)\n\)\s*;", txt, re.S)
+    adj = {}
+    he = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
+          (0, 4), (1, 5), (2, 6), (3, 7)]
+    for h in re.findall(r"hex\s*\(([^()]+)\)", m.group(1) if m else ""):
+        v = [int(x) for x in h.split()[:8]]
+        if len(v) < 8:
+            continue
+        for a, b in he:
+            adj.setdefault(v[a], set()).add(v[b])
+            adj.setdefault(v[b], set()).add(v[a])
+    return adj
+
+
+def _edge_section(txt):
+    """(match of the edges section, existing curve pairs, polyLine spans)."""
+    m = re.search(r"edges\s*\(\s*(.*?)\)\s*;\s*boundary", txt, re.S)
+    if not m:
+        return None, set(), []
+    body = m.group(1)
+    pairs = {(min(int(a), int(b)), max(int(a), int(b))) for a, b in re.findall(
+        r"(?:polyLine|arc|spline|BSpline|bspline)\s+(\d+)\s+(\d+)", body)}
+    spans = []
+    for pm in re.finditer(r"polyLine\s+(\d+)\s+(\d+)\s*\(", body):
+        i, depth = pm.end(), 1
+        while i < len(body) and depth:
+            depth += (body[i] == "(") - (body[i] == ")")
+            i += 1
+        a, b = int(pm.group(1)), int(pm.group(2))
+        spans.append(((min(a, b), max(a, b)), pm.start(), i))
+    return m, pairs, spans
+
+
+def _normal_edge_set():
+    try:
+        cur = json.load(open(os.path.join(SYS, "splits.json")))
+        return {(min(int(a), int(b)), max(int(a), int(b)))
+                for a, b in cur.get("normal_edges", [])}
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def _write_edge_curves(curves):
+    """Add {(a,b): [[x,y,z],...]} as polyLine edges to blockMeshDict; curves the
+    optimiser added earlier for the same edge are replaced. Remembered in
+    splits.json ("normal_edges") so they are not mistaken for surface edges."""
+    dp = os.path.join(SYS, "blockMeshDict")
+    txt = open(dp).read()
+    m, _pairs, spans = _edge_section(txt)
+    if m is None:
+        raise RuntimeError("no edges section in blockMeshDict")
+    mine = _normal_edge_set()
+    want = {(min(a, b), max(a, b)) for a, b in curves}
+    body = m.group(1)
+    for key, s0, e0 in sorted(spans, key=lambda t: -t[1]):
+        if key in want and key in mine:
+            body = body[:s0] + body[e0:]
+    add = "".join("\n    polyLine %d %d (%s)" % (
+        a, b, " ".join("(%.6g %.6g %.6g)" % tuple(p) for p in pts))
+        for (a, b), pts in curves.items())
+    body = body.rstrip() + add + "\n"
+    txt = txt[:m.start(1)] + body + txt[m.end(1):]
+    with open(dp, "w") as f:
+        f.write(txt)
+    sp = os.path.join(SYS, "splits.json")
+    try:
+        cur = json.load(open(sp))
+    except (OSError, ValueError):
+        cur = {}
+    cur["normal_edges"] = sorted([list(k) for k in (mine | want)])
+    with open(sp, "w") as f:
+        json.dump(cur, f)
+
+
+def _normal_curve(p0, p1, n, k=6):
+    """Cubic Bezier from surface vertex p0 to p1 that leaves p0 along the surface
+    normal n and arrives along the straight direction. None if the edge runs
+    almost along the surface (nothing sensible to do)."""
+    import numpy as np
+    d = p1 - p0
+    le = float(np.linalg.norm(d))
+    if le < 1e-9:
+        return None
+    u = d / le
+    n = np.asarray(n, float)
+    if float(n @ u) < 0:
+        n = -n
+    if float(n @ u) < 0.2:
+        return None
+    h = le / 3.0
+    c1, c2 = p0 + n * h, p1 - u * h
+    pts = []
+    for i in range(1, k + 1):
+        t = i / (k + 1.0)
+        b = ((1 - t) ** 3) * p0 + 3 * ((1 - t) ** 2) * t * c1 \
+            + 3 * (1 - t) * t * t * c2 + (t ** 3) * p1
+        pts.append(b.tolist())
+    return pts
+
+
+def _project_for_edges(P):
+    """Project points onto the car surface for edge curves: the distance field
+    (same projection as "Update projection") when loaded, else the smooth mesh,
+    else the STL."""
+    import numpy as np
+    if SDF is not None:
+        try:
+            with _lock:
+                out = np.asarray(SDF.project(P), dtype=float)
+            if out.shape == P.shape and np.isfinite(out).all():
+                return out
+        except Exception:
+            pass
+    target = "smooth" if os.path.exists(os.path.join(SYS, "car_sdf_surface.npz")) else "stl"
+    return snap_points(P, target)[0]
+
+
+def _refresh_interface_edges(changed=None, missing_only=False):
+    """Make EVERY interface edge (edge of a body/wheels wall quad) a polyLine whose
+    points lie on the car surface, so no interface edge is left straight.
+
+    changed=None      -> all interface edges
+    changed={vids}    -> only edges touching those vertices (they just moved)
+    missing_only=True -> only edges that have no polyLine yet (keep existing curves)
+    Returns a small summary dict; never raises."""
+    import numpy as np
+    try:
+        dp = os.path.join(SYS, "blockMeshDict")
+        txt = open(dp).read()
+        verts, quads, _nbr = _read_dict_surface()
+        if not quads:
+            return {"ok": True, "edges": 0, "written": 0, "added": 0}
+        wall = set()
+        for q in quads:
+            for a, b in zip(q, q[1:] + q[:1]):
+                if a != b:
+                    wall.add((min(a, b), max(a, b)))
+        m, pairs, spans = _edge_section(txt)
+        if m is None:
+            return {"ok": False, "error": "no edges section in blockMeshDict"}
+        span_of = {k: (s0, e0) for k, s0, e0 in spans}
+        other = pairs - set(span_of)              # arc/spline etc.: leave alone
+        mine = _normal_edge_set()                 # optimiser's off-surface curves
+        chg = None if changed is None else set(int(v) for v in changed)
+        todo = []
+        for e in sorted(wall):
+            if e in other or e in mine:
+                continue
+            if chg is not None and e[0] not in chg and e[1] not in chg:
+                continue
+            if missing_only and e in span_of:
+                continue
+            todo.append(e)
+        n_missing = sum(1 for e in todo if e not in span_of)
+        if not todo:
+            return {"ok": True, "edges": len(wall), "written": 0, "added": 0,
+                    "straight": sum(1 for e in wall if e not in span_of and e not in other)}
+        L = float(np.mean([np.linalg.norm(verts[a] - verts[b]) for a, b in wall]))
+        gd = _dict_grid()
+        dead = _dead_verts()
+        fixedv = set()
+        if gd is not None:
+            fixedv = {v for e in todo for v in e if _pin_vetoed(v, gd, dead)}
+        samples, layout = [], []
+        for a, b in todo:
+            pa, pb = verts[a], verts[b]
+            le = float(np.linalg.norm(pb - pa))
+            k = max(4, min(24, int(round(8 * le / max(L, 1e-9)))))
+            t = (np.arange(1, k + 1) / (k + 1.0))[:, None]
+            samples.append(pa + (pb - pa) * t)
+            layout.append((a, b, k))
+        Q = _project_for_edges(np.vstack(samples))
+        add, pos = [], 0
+        for a, b, k in layout:
+            pts = Q[pos:pos + k].copy()
+            pos += k
+            if a in fixedv and b in fixedv:        # edge on the outer boundary:
+                for ax in range(3):                # stay in that boundary plane
+                    if abs(verts[a][ax] - verts[b][ax]) < 1e-9:
+                        pts[:, ax] = verts[a][ax]
+            add.append("\n    polyLine %d %d (%s)" % (
+                a, b, " ".join("(%.6g %.6g %.6g)" % tuple(p) for p in pts)))
+        body = m.group(1)
+        for key, (s0, e0) in sorted(((e, span_of[e]) for e in todo if e in span_of),
+                                    key=lambda t: -t[1][0]):
+            body = body[:s0] + body[e0:]
+        body = body.rstrip() + "".join(add) + "\n"
+        txt = txt[:m.start(1)] + body + txt[m.end(1):]
+        with open(dp, "w") as f:
+            f.write(txt)
+        return {"ok": True, "edges": len(wall), "written": len(todo), "added": n_missing,
+                "straight": 0}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+
 def _opt_job(params):
     import numpy as np
     max_iter = max(1, min(30, int(params.get("max_iter", 6))))
     max_verts = max(5, min(2000, int(params.get("max_verts", 300))))
     target = "stl" if str(params.get("target", "smooth")) == "stl" else "smooth"
+    use_normal = bool(params.get("normal_edges", False))
     if target == "smooth" and not os.path.exists(os.path.join(SYS, "car_sdf_surface.npz")):
         target = "stl"
         _opt_log("smooth surface mesh not built yet - snapping to the STL instead")
@@ -1178,8 +1457,8 @@ def _opt_job(params):
     if not nbr:
         raise RuntimeError("no body/wheels surface faces in blockMeshDict")
     surf = np.array(sorted(nbr))
-    fixed = [v for v in surf if _pin_vetoed(int(v), gd, dead)]
-    fixed_set = set(int(v) for v in fixed)
+    surf_set = set(int(v) for v in surf)
+    fixed_set = set(int(v) for v in surf if _pin_vetoed(int(v), gd, dead))
     edges = {(min(a, b), max(a, b)) for a in nbr for b in nbr[a]}
     # Vertices on the rim of the wall patch only slide ALONG the rim (so the
     # car outline does not shrink); interior vertices use all their neighbours.
@@ -1195,7 +1474,7 @@ def _opt_job(params):
             bnbr.setdefault(b, set()).add(a)
     nbr_use = {v: (bnbr[v] if v in bnbr else nbr[v]) for v in nbr}
     L = float(np.mean([np.linalg.norm(verts[a] - verts[b]) for a, b in edges]))
-    # keep a safe copy of the starting point
+    adj = _hex_adjacency() if use_normal else {}
     try:
         import shutil
         shutil.copy(os.path.join(SYS, "blockMeshDict"),
@@ -1206,38 +1485,32 @@ def _opt_job(params):
     except OSError:
         pass
     _opt_log("Optimiser: %d surface vertices (%d on outer boundary, kept fixed), "
-             "mean surface edge %.1f mm, snapping to the %s surface"
-             % (len(surf), len(fixed_set), L * 1000, "smooth" if target == "smooth" else "STL"))
-    _opt_log("Baseline: blockMesh + checkMesh ...")
-    _opt_set(message="baseline blockMesh + checkMesh", trial="baseline")
+             "mean surface edge %.1f mm, snapping to the %s surface%s"
+             % (len(surf), len(fixed_set), L * 1000, "smooth" if target == "smooth" else "STL",
+                ", normal edges ON" if use_normal else ""))
+    _opt_set(message="baseline: building mesh + checkMesh", trial="baseline")
     best_r, blog = _mesh_and_check()
     if best_r is None:
         raise RuntimeError("blockMesh failed: " + " | ".join(blog.strip().splitlines()[-3:]))
     best_s = _score(best_r)
     _opt_set(score=best_s, base=best_s, result=best_r)
     _opt_log("Baseline: " + _summ(best_r))
+    _opt_set(message="baseline: " + _summ(best_r))
     snap_best = _snapshot()
     mesh_is_best = True
     relax = 0.5
     R = 2.5 * L
 
-    for it in range(1, max_iter + 1):
-        with _opt_mu:
-            if _opt["cancel"]:
-                break
-        if _n_problems(best_r) == 0:
-            _opt_log("No checkMesh problems left - done.")
-            break
-        _opt_set(iter=it)
-        probs = sorted(_problem_points(best_r), key=lambda t: -t[1])[:3000]
+    def select(r):
+        """Surface vertices (movable) next to the current problems, worst first."""
+        probs = sorted(_problem_points(r), key=lambda t: -t[1])[:3000]
         PS = verts[surf]
         wt = np.zeros(len(surf))
         kinds = [dict() for _ in surf]
         far = 0
         for c, w, kind in probs:
             d = np.linalg.norm(PS - np.asarray(c), axis=1)
-            k = min(4, len(d) - 1)
-            for n in np.argpartition(d, k)[:4] if len(d) > 4 else range(len(d)):
+            for n in (np.argpartition(d, 4)[:4] if len(d) > 4 else range(len(d))):
                 if d[n] <= R:
                     wt[n] += w / (1.0 + d[n] / L)
                     kinds[n][kind] = kinds[n].get(kind, 0) + 1
@@ -1245,60 +1518,129 @@ def _opt_job(params):
                 far += 1
         order = [int(n) for n in np.argsort(-wt)
                  if wt[n] > 0 and int(surf[n]) not in fixed_set][:max_verts]
+        return order, kinds, far
+
+    def cancelled():
+        with _opt_mu:
+            return _opt["cancel"]
+
+    for it in range(1, max_iter + 1):
+        if cancelled():
+            break
+        if _n_problems(best_r) == 0:
+            _opt_log("No checkMesh problems left - done.")
+            break
+        _opt_set(iter=it)
+        tag = "iter %d/%d" % (it, max_iter)
+        improved_a = improved_b = False
+
+        # ---- stage A: slide surface vertices (Laplacian step, re-snapped) ----
+        order, kinds, far = select(best_r)
         if far:
             _opt_log("  %d problem location(s) are too far from the surface to be "
                      "fixed by surface vertices" % far)
-        if not order:
-            _opt_log("Iteration %d: no movable surface vertices near the problems - stopping." % it)
-            break
-        ids = [int(surf[n]) for n in order]
-        _opt_log("Iteration %d/%d: %d surface vertices sit next to problem cells"
-                 % (it, max_iter, len(ids)))
-        improved = False
-        for a in (relax, relax / 2.0, relax / 4.0):
-            with _opt_mu:
-                if _opt["cancel"]:
+        if order:
+            ids = [int(surf[n]) for n in order]
+            _opt_log("Iteration %d/%d: %d surface vertices sit next to problem cells"
+                     % (it, max_iter, len(ids)))
+            for a in (relax, relax / 2.0, relax / 4.0):
+                if cancelled():
                     break
-            new, moved = _propose(verts, ids, nbr_use, a, target)
-            tgt = [{"vid": v, "from": verts[v].tolist(), "to": new[n].tolist()}
-                   for n, v in enumerate(ids)]
-            _opt_set(targets=tgt, trial="it%d-a%.3f" % (it, a),
-                     message="iteration %d/%d, relax %.2f: %d vertices" % (it, max_iter, a, len(ids)))
-            for n, v in list(enumerate(ids))[:25]:
-                near = ", ".join("%d %s" % (c, k) for k, c in sorted(kinds[order[n]].items()))
-                _opt_log("  fixing vertex %d (grid %s): near %s -> move %.2f mm"
-                         % (v, _vid_key(v, gd), near, moved[n] * 1000))
-            if len(ids) > 25:
-                _opt_log("  ... and %d more vertices" % (len(ids) - 25))
-            _write_vertices({v: new[n] for n, v in enumerate(ids)})
-            _opt_log("  trial relax %.2f: blockMesh + checkMesh ..." % a)
-            r, blog = _mesh_and_check()
-            s = _score(r)
-            if r is not None and s < best_s - 1e-9:
-                _opt_log("  trial relax %.2f: %s  (score %.1f -> %.1f) ACCEPTED"
-                         % (a, _summ(r), best_s, s))
+                new, moved = _propose(verts, ids, nbr_use, a, target)
+                tgt = [{"vid": v, "from": verts[v].tolist(), "to": new[n].tolist()}
+                       for n, v in enumerate(ids)]
+                _opt_set(targets=tgt, trial="it%d-a%.3f" % (it, a),
+                         message="%s: moving %d vertices (step %.2f)" % (tag, len(ids), a))
+                for n, v in list(enumerate(ids))[:25]:
+                    near = ", ".join("%d %s" % (c, k) for k, c in sorted(kinds[order[n]].items()))
+                    _opt_log("  fixing vertex %d (grid %s): near %s -> move %.2f mm"
+                             % (v, _vid_key(v, gd), near, moved[n] * 1000))
+                if len(ids) > 25:
+                    _opt_log("  ... and %d more vertices" % (len(ids) - 25))
+                _write_vertices({v: new[n] for n, v in enumerate(ids)})
+                _opt_log("  trial step %.2f: blockMesh + checkMesh ..." % a)
+                r, blog = _mesh_and_check()
+                s = _score(r)
+                if r is not None and s < best_s - 1e-9:
+                    _opt_log("  trial step %.2f: %s  (score %.1f -> %.1f) ACCEPTED"
+                             % (a, _summ(r), best_s, s))
+                    for n, v in enumerate(ids):
+                        verts[v] = new[n]
+                    best_r, best_s = r, s
+                    snap_best = _snapshot()
+                    mesh_is_best = True
+                    relax = a
+                    improved_a = True
+                    _opt_set(score=best_s, result=best_r,
+                             message="%s: better - %s" % (tag, _summ(r)))
+                    break
+                _opt_log("  trial step %.2f: %s  (score %s) rejected, reverted"
+                         % (a, _summ(r), "n/a" if r is None else "%.1f" % s))
+                _opt_set(message="%s: step %.2f rejected" % (tag, a))
+                _restore(snap_best)
+                mesh_is_best = False
+        else:
+            _opt_log("Iteration %d: no movable surface vertices near the problems" % it)
+
+        if cancelled():
+            break
+
+        # ---- stage B: edges leaving the surface approach it along the normal ---
+        if use_normal and _n_problems(best_r) > 0:
+            order, kinds, far = select(best_r)
+            ids = [int(surf[n]) for n in order]
+            if ids:
+                nrm = _surface_normals(verts[ids], target)
+                have = _edge_section(open(os.path.join(SYS, "blockMeshDict")).read())[1]
+                mine = _normal_edge_set()
+                curves, ends, tangential = {}, [], 0
                 for n, v in enumerate(ids):
-                    verts[v] = new[n]
-                best_r, best_s = r, s
-                snap_best = _snapshot()
-                mesh_is_best = True
-                relax = a
-                improved = True
-                _opt_set(score=best_s, result=best_r)
-                break
-            _opt_log("  trial relax %.2f: %s  (score %s) rejected, reverted"
-                     % (a, _summ(r), "n/a" if r is None else "%.1f" % s))
-            _restore(snap_best)
-            mesh_is_best = False
-        with _opt_mu:
-            cancelled = _opt["cancel"]
-        if cancelled:
+                    for w in sorted(adj.get(v, ())):
+                        if w in surf_set:
+                            continue              # lies on the surface already
+                        key = (min(v, w), max(v, w))
+                        if key in have and key not in mine:
+                            continue              # already a projected/curved edge
+                        pts = _normal_curve(verts[v], verts[w], nrm[n])
+                        if pts is None:
+                            tangential += 1
+                            continue
+                        curves[(v, w)] = pts
+                        ends.append({"vid": v, "from": verts[v].tolist(),
+                                     "to": verts[w].tolist()})
+                if curves:
+                    _opt_log("Iteration %d/%d: curving %d edge(s) at %d vertices so they "
+                             "leave the surface along its normal%s"
+                             % (it, max_iter, len(curves), len({v for v, _ in curves}),
+                                " (%d skipped: nearly tangential)" % tangential if tangential else ""))
+                    _opt_set(targets=ends, trial="it%d-normal" % it,
+                             message="%s: curving %d edges" % (tag, len(curves)))
+                    _write_edge_curves(curves)
+                    r, blog = _mesh_and_check()
+                    s = _score(r)
+                    if r is not None and s < best_s - 1e-9:
+                        _opt_log("  normal edges: %s  (score %.1f -> %.1f) ACCEPTED"
+                                 % (_summ(r), best_s, s))
+                        best_r, best_s = r, s
+                        snap_best = _snapshot()
+                        mesh_is_best = True
+                        improved_b = True
+                        _opt_set(score=best_s, result=best_r,
+                                 message="%s: normal edges better - %s" % (tag, _summ(r)))
+                    else:
+                        _opt_log("  normal edges: %s  (score %s) rejected, reverted"
+                                 % (_summ(r), "n/a" if r is None else "%.1f" % s))
+                        _opt_set(message="%s: normal edges rejected" % tag)
+                        _restore(snap_best)
+                        mesh_is_best = False
+                else:
+                    _opt_log("Iteration %d: no off-surface edges to curve here" % it)
+        if cancelled():
             break
-        if not improved:
-            _opt_log("No further improvement from moving these vertices - stopping.")
+        if not (improved_a or improved_b):
+            _opt_log("No further improvement - stopping.")
             break
-    with _opt_mu:
-        was_cancelled = _opt["cancel"]
+    was_cancelled = cancelled()
     if not mesh_is_best:
         _opt_log("Restoring best mesh (blockMesh) ...")
         _opt_set(message="restoring best mesh", targets=[])
@@ -1307,7 +1649,8 @@ def _opt_job(params):
     base = _opt["base"]
     _opt_log(("Stopped by user. " if was_cancelled else "Finished. ")
              + "Result: " + _summ(best_r) + "  (score %.1f -> %.1f)" % (base, best_s))
-    _opt_set(result=best_r, cancelled=was_cancelled)
+    _opt_set(result=best_r, cancelled=was_cancelled,
+             message=("stopped: " if was_cancelled else "finished: ") + _summ(best_r))
 
 
 def _opt_thread(params):
@@ -1315,7 +1658,7 @@ def _opt_thread(params):
     try:
         _opt_job(params)
     except Exception as e:
-        _opt_set(error=str(e))
+        _opt_set(error=str(e), message="ERROR: %s" % e)
         _opt_log("ERROR: %s" % e)
         try:
             with open("/tmp/optimise_err.log", "a") as f:
@@ -1485,15 +1828,25 @@ class H(BaseHTTPRequestHandler):
                 curve_ids = []
                 m3 = _re.search(r"edges\s*\(\s*(.*?)\)\s*;\s*boundary", txt, _re.S)
                 if m3:
+                    _nes = _normal_edge_set()
                     for em in _re.finditer(r"polyLine\s+(\d+)\s+(\d+)\s*\((.*?)\)(?=\s*polyLine|\s*$)",
                                            m3.group(1), _re.S):
                         a, b = int(em.group(1)), int(em.group(2))
+                        if (min(a, b), max(a, b)) in _nes:
+                            continue
                         mid = [[float(x) for x in ln.split()]
                                for ln in _re.findall(r"\(([^()]+)\)", em.group(3))]
                         curves.append([verts[a]] + mid + [verts[b]])
                         curve_ids.append([a, b])
             except (ValueError, AttributeError) as e:
                 return self._json({"error": f"dict parse failed: {e}"}, 500)
+            _wall_e = set()
+            for _q in fidx:
+                for _a, _b in zip(_q, _q[1:] + _q[:1]):
+                    if _a != _b:
+                        _wall_e.add((min(_a, _b), max(_a, _b)))
+            _have_e = {(min(a_, b_), max(a_, b_)) for a_, b_ in curve_ids}
+            n_straight = len(_wall_e - _have_e)
 
             # The grid the dict was ACTUALLY built from (stamped // SPLITS:).
             # Clients must decode vertex ids with THESE, never with splits.json
@@ -1526,7 +1879,7 @@ class H(BaseHTTPRequestHandler):
             out = {"quads": quads, "curves": curves, "curveIds": curve_ids, "verts": verts,
                    "fidx": fidx, "x": gxs, "y": gys, "z": gzs,
                    "nx": len(gxs) - 1, "ny": len(gys) - 1, "nz": len(gzs) - 1,
-                   "drift": drift}
+                   "drift": drift, "n_straight": n_straight}
             if drift:
                 out["drift_msg"] = ("dict grid %dx%dx%d != splits.json — "
                                     "regenerate (Export) to resync"
@@ -1624,6 +1977,8 @@ class H(BaseHTTPRequestHandler):
                     SDF = reload_field(SDF_PATH)
                     _sdf_surface_cache.clear()
                     _snap_cache.pop("smooth", None)
+                    _snap_cache.pop("cent_smooth", None)
+                    _snap_cache.pop("cr_smooth", None)
                 with open(os.path.join(SYS, "car_sdf.json"), encoding="utf-8") as _f:
                     _meta = json.load(_f)
                 return self._json({"ok": True, "spacing_cm": spacing_cm,
@@ -1713,6 +2068,8 @@ class H(BaseHTTPRequestHandler):
             if code != 0:
                 return self._json({"ok": False, "log": tail})
             out = {"ok": True, "log": tail}
+            # whatever the generator left straight on the interface is curved now
+            out["interface_edges"] = _refresh_interface_edges(None, missing_only=True)
             if data.get("runMesh"):
                 _, mlog = run(["bash", "-lc",
                                "source /opt/openfoam12/etc/bashrc; "
@@ -1790,6 +2147,7 @@ class H(BaseHTTPRequestHandler):
             except (OSError, AttributeError) as e:
                 return self._json({"error": f"dict read failed: {e}"}, 500)
             _n = 0
+            _old_v = list(vlines)
             for _k, _p in _clean.items():
                 _vi = int(_k)
                 if 0 <= _vi < len(vlines) and len(_p) == 3 \
@@ -1810,7 +2168,10 @@ class H(BaseHTTPRequestHandler):
                     f.write(txt)
             except (OSError, ValueError) as e:
                 return self._json({"error": f"write failed: {e}"}, 500)
-            return self._json({"ok": True, "patched": _n, "vetoed": _vetoed})
+            _chg = {i for i, (a_, b_) in enumerate(zip(_old_v, vlines)) if a_ != b_}
+            _ie = _refresh_interface_edges(_chg) if _chg else {"ok": True, "written": 0}
+            return self._json({"ok": True, "patched": _n, "vetoed": _vetoed,
+                               "interface_edges": _ie})
         if u.path == "/api/saveover":
             # Persist staged DEAD/LIVE block overrides into splits.json without
             # regenerating blockMeshDict, so a reload restores them.
@@ -1916,7 +2277,14 @@ class H(BaseHTTPRequestHandler):
                     f.write(txt)
             except (OSError, AttributeError, IndexError, ValueError) as e:
                 return self._json({"error": f"blockMeshDict write failed: {e!r}"}, 500)
-            return self._json({"ok": True, "vid": _vi, "point": _base})
+            _ie = _refresh_interface_edges({_vi})
+            return self._json({"ok": True, "vid": _vi, "point": _base,
+                               "interface_edges": _ie})
+        if u.path == "/api/interface_edges":
+            # {missing_only: bool=true}: make every interface edge a projected polyLine
+            _backup_dict()
+            return self._json(_refresh_interface_edges(
+                None, missing_only=bool(data.get("missing_only", True))))
         if u.path == "/api/snap":
             # Nearest point on a surface: target "stl" (car STL) or "smooth"
             # (smooth distance-field mesh). {points:[[x,y,z],...], target}

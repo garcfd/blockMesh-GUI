@@ -82,8 +82,8 @@
   .btn:hover{filter:brightness(1.15)}
   .btn.busy{background:var(--ok);color:#04140a;pointer-events:none;opacity:.85}
   .btn.running{background:var(--ok);color:#04140a;font-weight:600}
-  #optlog{display:none;margin:6px 0;padding:6px;max-height:190px;overflow:auto;white-space:pre-wrap;
-          font:11px/1.45 Consolas,monospace;background:var(--panel2);border:1px solid var(--line);border-radius:7px}
+  #optlog{display:none;margin:4px 0;padding:3px 6px;white-space:nowrap;overflow:hidden;
+          text-overflow:ellipsis;font:11px/1.5 Consolas,monospace;color:var(--ok)}
   .btn.ghost{background:var(--panel2);border:1px solid var(--line);font-weight:400}
   .btn.danger{background:#5a2228}
   .btnrow{display:flex;gap:6px;margin-top:6px}
@@ -172,8 +172,8 @@
   <div class="btnrow"><button class="btn ghost" id="selcbtn">Select vertex</button><button class="btn ghost" id="sldcbtn">Slide vertex</button></div>
   <div class="btnrow"><button class="btn ghost" id="nearbtn">Nearest surface</button><button class="btn ghost" id="smoothbtn">Smooth surface</button></div>
   <div class="btnrow"><button class="btn" id="updproj">Update projection</button><button class="btn ghost" id="undopbtn">Undo projection</button></div>
-  <div class="btnrow" style="align-items:center"><button class="btn" id="optbtn" title="Moves surface vertices next to checkMesh problem cells, keeping them on the surface, and keeps only changes that improve checkMesh. Each trial runs blockMesh + checkMesh.">Optimise mesh</button><input type="number" id="optiter" min="1" max="30" step="1" value="6" title="max iterations" style="width:56px"><select id="optsurf" title="surface the vertices are kept on" style="width:84px"><option value="smooth">smooth</option><option value="stl">STL</option></select></div>
-  <pre id="optlog"></pre>
+  <div class="btnrow" style="align-items:center"><button class="btn" id="optbtn" title="Moves surface vertices next to checkMesh problem cells, keeping them on the smooth surface, and keeps only changes that improve checkMesh. Each trial runs blockMesh + checkMesh.">Optimise mesh</button><input type="number" id="optiter" min="1" max="30" step="1" value="6" title="max iterations" style="width:56px"><label class="chk" style="white-space:nowrap" title="Also curve the block edges that leave the surface at problem vertices so they approach it along the surface normal (edges already projected onto the surface are left alone)."><input type="checkbox" id="optnorm"> normal edges</label></div>
+  <div id="optlog"></div>
   </div>
   <div class="btnrow"><button class="btn" id="expbtn">Write blockMeshDict</button></div>
   <div class="btnrow"><button class="btn" id="runbmbtn">Run blockMesh</button></div>
@@ -185,7 +185,7 @@
   <label class="chk"><input type="checkbox" id="shsdf" checked> distance field</label>
   <label class="chk"><input type="checkbox" id="shface" checked> blocks</label>
   <label class="chk"><input type="checkbox" id="shbox" checked> outer boundary</label>
-  <label class="chk"><input type="checkbox" id="shcell"> cell lines</label>
+  <label class="chk"><input type="checkbox" id="shcell"> projected cells</label>
   <label class="chk"><input type="checkbox" id="shedge" checked> projected edges</label>
   <label class="chk"><input type="checkbox" id="shmesh"> projected mesh</label>
   <label class="chk"><input type="checkbox" id="shbad"> negative volume cells (red) <span id="shbadn" class="mut"></span></label>
@@ -891,82 +891,118 @@ async function refreshBlocks(){
     for(let i=ifaceGroup.children.length-1;i>=0;i--){
       const o=ifaceGroup.children[i]; ifaceGroup.remove(o); if(o.geometry)o.geometry.dispose();
     }
-    for(let i=cellGroup.children.length-1;i>=0;i--){
-      const o=cellGroup.children[i]; cellGroup.remove(o); if(o.geometry)o.geometry.dispose();
-    }
-    if(r.wall.length){
-      const wq=r.wallq||[];
-      // black block edges over the faces, subdivided by the block's cell
-      // counts so every inter-cell line shows (wall arrives as quads)
-      const bili=(Q,s,t)=>{
-        const a0=[Q[0][0]+(Q[1][0]-Q[0][0])*s, Q[0][1]+(Q[1][1]-Q[0][1])*s, Q[0][2]+(Q[1][2]-Q[0][2])*s];
-        const a1=[Q[3][0]+(Q[2][0]-Q[3][0])*s, Q[3][1]+(Q[2][1]-Q[3][1])*s, Q[3][2]+(Q[2][2]-Q[3][2])*s];
-        return [a0[0]+(a1[0]-a0[0])*t, a0[1]+(a1[1]-a0[1])*t, a0[2]+(a1[2]-a0[2])*t];
-      };
-      const edgeAxis=(A,B)=>{
-        for(let a=0;a<3;a++) if(A[a]!==B[a]) return a;
-        return 0;
-      };
-      const lp=[];
-      const _grid=S.dictGrid||S.splits;
-      const _nx=_grid.x.length-1, _ny=_grid.y.length-1;
-      const _curveKeys=new Set((S.faceProj?.curveIds||[]).map(e=>[...e].sort((a,b)=>a-b).join(":")));
-      const _vId=e=>e[0]+(_nx+1)*(e[1]+(_ny+1)*e[2]);
-      const _isCurve=(a,b)=>_curveKeys.has([_vId(a),_vId(b)].sort((x,y)=>x-y).join(":"));
-      if(wq.length){
-        for(const w of wq){
-          const b=findBlock(w.b);
-          const nc=b&&b.nc?b.nc:[1,1,1];
-          const Q=w.q, E=w.e;
-          const nu=Math.max(1,nc[edgeAxis(E[0],E[1])]||1);
-          const nv=Math.max(1,nc[edgeAxis(E[1],E[2])]||1);
-          for(let a=0;a<=nu;a++)for(let b2=0;b2<=nv;b2++){
-            if(a<nu){
-              const onCurve=(b2===0&&_isCurve(E[0],E[1]))||(b2===nv&&_isCurve(E[3],E[2]));
-              if(!onCurve){const p0=bili(Q,a/nu,b2/nv),p1=bili(Q,(a+1)/nu,b2/nv);lp.push(...p0,...p1);}
-            }
-            if(b2<nv){
-              const onCurve=(a===0&&_isCurve(E[0],E[3]))||(a===nu&&_isCurve(E[1],E[2]));
-              if(!onCurve){const p0=bili(Q,a/nu,b2/nv),p1=bili(Q,a/nu,(b2+1)/nv);lp.push(...p0,...p1);}
-            }
-          }
-        }
-      } else {
-        for(let f=0; f+5<r.wall.length; f+=6){
-          const q=[r.wall[f],r.wall[f+1],r.wall[f+2],r.wall[f+5]];
-          for(const [a,b] of [[0,1],[1,2],[2,3],[3,0]]) lp.push(...q[a], ...q[b]);
-        }
-      }
-      if(lp.length){
-        const lg=new THREE.BufferGeometry();
-        lg.setAttribute("position", new THREE.Float32BufferAttribute(lp,3));
-        const lm=new THREE.LineSegments(lg,
-          new THREE.LineBasicMaterial({color:0xffffff}));
-        lm.visible=$("shcell")&&$("shcell").checked;
-        lm.userData.cellLines=true;
-        cellGroup.add(lm);
-      }
-    }
+    S.wallRaw = r.wall || [];
+    rebuildCellLines();
     if(showMode) buildRangeBoxes();
     // Always rebuild the projected edges after any block change so they track
     // LIVE→DEAD flips even when the overlay is toggled off.
     await refreshProjectedMesh();
   }catch(e){ log("blocks refresh failed: "+e.message); }
 }
+/* ---- projected cells: the cell lines of the wall as blockMesh will build them ----
+   Uses the ACTUAL dictionary vertices and their polyLine edges (Coons patch over
+   the four edge curves, points spaced by arc length like blockMesh). Falls back
+   to the ideal block-face grid if the dict was built from different splits. */
+function _curveIndex(){
+  const F=S.faceProj; if(!F||!F.curves) return new Map();
+  if(F._idx) return F._idx;
+  const m=new Map();
+  (F.curves||[]).forEach((pts,i)=>{
+    const ids=(F.curveIds||[])[i]; if(!ids||!pts||pts.length<2) return;
+    const cum=[0];
+    for(let j=1;j<pts.length;j++){ const p=pts[j-1], q=pts[j];
+      cum.push(cum[j-1]+Math.hypot(q[0]-p[0],q[1]-p[1],q[2]-p[2])); }
+    m.set(ids[0]+":"+ids[1], {pts, cum, rev:false});
+    m.set(ids[1]+":"+ids[0], {pts, cum, rev:true});
+  });
+  F._idx=m; return m;
+}
+function _edgePoint(dv, ia, ib, u){
+  const c=_curveIndex().get(ia+":"+ib);
+  if(!c){ const A=dv[ia], B=dv[ib];
+    return [A[0]+(B[0]-A[0])*u, A[1]+(B[1]-A[1])*u, A[2]+(B[2]-A[2])*u]; }
+  const L=c.cum[c.cum.length-1];
+  if(!(L>0)) return dv[ia].slice();
+  const d=(c.rev?1-u:u)*L;
+  let j=1; while(j<c.cum.length-1 && c.cum[j]<d) j++;
+  const t=(d-c.cum[j-1])/Math.max(c.cum[j]-c.cum[j-1],1e-12), p=c.pts[j-1], q=c.pts[j];
+  return [p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t, p[2]+(q[2]-p[2])*t];
+}
+function rebuildCellLines(){
+  for(let i=cellGroup.children.length-1;i>=0;i--){
+    const o=cellGroup.children[i]; cellGroup.remove(o); if(o.geometry)o.geometry.dispose();
+  }
+  const wq=S.wallq||[];
+  const lp=[];
+  const same=(a,b)=>a&&b&&a.length===b.length&&a.every((v,i)=>Math.abs(v-b[i])<1e-9);
+  const g=S.dictGrid, dv=S.dictVerts||[];
+  const useDict=!!(g&&same(g.x,S.splits.x)&&same(g.y,S.splits.y)&&same(g.z,S.splits.z)
+                   && dv.length===g.x.length*g.y.length*g.z.length);
+  const nx1=S.splits.x.length, ny1=S.splits.y.length;
+  const vId=e=>e[0]+nx1*(e[1]+ny1*e[2]);
+  const edgeAxis=(A,B)=>{ for(let a=0;a<3;a++) if(A[a]!==B[a]) return a; return 0; };
+  if(wq.length){
+    for(const w of wq){
+      const b=findBlock(w.b), nc=b&&b.nc?b.nc:[1,1,1], E=w.e;
+      const nu=Math.max(1,nc[edgeAxis(E[0],E[1])]||1), nv=Math.max(1,nc[edgeAxis(E[1],E[2])]||1);
+      let pt=(s,t)=>_bili(w.q,s,t);                          // ideal fallback
+      const ids=E.map(vId);
+      if(useDict && ids.every(i=>dv[i])){
+        const C=ids.map(i=>dv[i]);
+        pt=(s,t)=>{
+          const Bm=_edgePoint(dv,ids[0],ids[1],s), Tp=_edgePoint(dv,ids[3],ids[2],s);
+          const Lf=_edgePoint(dv,ids[0],ids[3],t), Rt=_edgePoint(dv,ids[1],ids[2],t);
+          const o=[0,0,0];
+          for(let k=0;k<3;k++)
+            o[k]=(1-t)*Bm[k]+t*Tp[k]+(1-s)*Lf[k]+s*Rt[k]
+                -((1-s)*(1-t)*C[0][k]+s*(1-t)*C[1][k]+s*t*C[2][k]+(1-s)*t*C[3][k]);
+          return o;
+        };
+      }
+      const G=[];
+      for(let a=0;a<=nu;a++){ const row=[]; for(let c=0;c<=nv;c++) row.push(pt(a/nu,c/nv)); G.push(row); }
+      for(let a=0;a<=nu;a++)for(let c=0;c<=nv;c++){
+        if(a<nu) lp.push(...G[a][c],...G[a+1][c]);
+        if(c<nv) lp.push(...G[a][c],...G[a][c+1]);
+      }
+    }
+  } else if(S.wallRaw && S.wallRaw.length){
+    const W=S.wallRaw;
+    for(let f=0; f+5<W.length; f+=6){
+      const q=[W[f],W[f+1],W[f+2],W[f+5]];
+      for(const [a,b] of [[0,1],[1,2],[2,3],[3,0]]) lp.push(...q[a], ...q[b]);
+    }
+  }
+  if(!lp.length) return;
+  const lg=new THREE.BufferGeometry();
+  lg.setAttribute("position", new THREE.Float32BufferAttribute(lp,3));
+  const lm=new THREE.LineSegments(lg, new THREE.LineBasicMaterial({color:0xffffff}));
+  lm.visible=!!($("shcell")&&$("shcell").checked);
+  lm.userData.cellLines=true;
+  cellGroup.add(lm);
+}
 /* projected mesh: the cell lines above, every vertex snapped onto the car
    surface (STL) so the subdivision drapes over the body. */
-let meshBusy=false;
+let meshBusy=false, meshPending=false;
 function _bili(Q,s,t){
   const a0=[Q[0][0]+(Q[1][0]-Q[0][0])*s, Q[0][1]+(Q[1][1]-Q[0][1])*s, Q[0][2]+(Q[1][2]-Q[0][2])*s];
   const a1=[Q[3][0]+(Q[2][0]-Q[3][0])*s, Q[3][1]+(Q[2][1]-Q[3][1])*s, Q[3][2]+(Q[2][2]-Q[3][2])*s];
   return [a0[0]+(a1[0]-a0[0])*t, a0[1]+(a1[1]-a0[1])*t, a0[2]+(a1[2]-a0[2])*t];
 }
 async function refreshProjectedMesh(){
-  if(meshBusy) return; meshBusy=true;
-  try{
+  if(meshBusy){ meshPending=true; return; }       // run once more when this one ends
+  meshBusy=true;
+  try{ await _buildProjectedMesh(); }
+  catch(e){ S._meshMsg="projected mesh failed: "+(e&&e.message?e.message:e); log(S._meshMsg); }
+  meshBusy=false;
+  if(meshPending){ meshPending=false; await refreshProjectedMesh(); }
+}
+async function _buildProjectedMesh(){
+  S._meshMsg="";
+  {
     clearGroup(meshGroup);
     const wq = S.wallq || [];
-    if(!wq.length){ meshGroup.visible=false; meshBusy=false; return; }
+    if(!wq.length){ meshGroup.visible=false; S._meshMsg="projected mesh: no wall faces yet - mark some blocks solid first"; return; }
     const key2i=new Map(), uniq=[], segs=[];
     const add=p=>{
       const kk=p[0].toFixed(5)+","+p[1].toFixed(5)+","+p[2].toFixed(5);
@@ -1002,11 +1038,24 @@ async function refreshProjectedMesh(){
         if(c<nv) segs.push(grid[a][c], grid[a][c+1]);
       }
     }
-    if(!uniq.length){ meshGroup.visible=false; meshBusy=false; return; }
-    const r = await api("/api/projectmesh", {method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({points:uniq})});
-    const P = r.points || [];
+    if(!uniq.length){ meshGroup.visible=false; return; }
+    let P=[];
+    try{
+      const r = await api("/api/projectmesh", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({points:uniq})});
+      P = r.points || [];
+    }catch(e){
+      // distance field not available: snap to the STL instead (chunked)
+      log("projectmesh failed ("+(e&&e.message?e.message:e)+") - using STL snap");
+      for(let i=0;i<uniq.length;i+=4000){
+        const r = await api("/api/snap", {method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({points:uniq.slice(i,i+4000), target:"stl"})});
+        P.push(...(r.points||[]));
+      }
+      S._meshMsg="projected mesh: distance field unavailable - snapped to the STL";
+    }
     const lp=[];
     for(const s of segs){ const q=P[s]; if(q) lp.push(q[0],q[1],q[2]); }
     const lg=new THREE.BufferGeometry();
@@ -1017,8 +1066,7 @@ async function refreshProjectedMesh(){
     meshGroup.add(lm);
     meshGroup.visible=$("shmesh").checked;
     log("projected mesh: "+uniq.length+" verts");
-  }catch(e){ log("projected mesh failed: "+e.message); }
-  meshBusy=false;
+  }
 }
 function paintBlock(key, state){
   S.over[key] = state;
@@ -1592,7 +1640,12 @@ $("expbtn").onclick=async()=>{
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     if(r.ok===false) throw new Error(tailMsg(r.log,2)||"exporter failed");
     setStat("blockMeshDict written"); log(r.log||"blockMeshDict written");
+    await loadDictSurface();            // the dict was regenerated: re-read wall + curves
     await refreshBlocks();
+    refreshSelHL();
+    const ie=r.interface_edges;
+    if(ie&&ie.ok&&ie.added) setStat(`blockMeshDict written · ${ie.added} interface edges projected onto the surface`);
+    else if(ie&&ie.ok===false) setStat("blockMeshDict written · interface edges NOT updated: "+(ie.error||"?"));
   }catch(e){ const m="export failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
   finally{ busy(_b,false); btn.textContent=old; }
 };
@@ -1651,8 +1704,11 @@ function applyCheckResult(r){
       lines.push(`${n>0?"✗":"✓"} ${n} ${it.label}${n>0?mx:""}`);
       if(n>0) bad.push(`${n} ${it.label}`);
     }
+    const notes=(r.notes||[]).concat(r.geom_error?["could not read mesh geometry: "+r.geom_error]:[]);
+    for(const n of notes) log("checkMesh: "+n);
     if($("checkstat")) $("checkstat").textContent=
-      (r.n_cells?`${r.n_cells} cells\n`:"")+lines.join("\n")+(r.mesh_ok?"\nMesh OK":"");
+      (r.n_cells?`${r.n_cells} cells\n`:"")+lines.join("\n")+(r.mesh_ok?"\nMesh OK":"")
+      +(notes.length?"\n⚠ "+notes.join("\n⚠ "):"");
     applyVis();
     const nCells=r.n_cells||0;
     const msg = bad.length
@@ -1673,10 +1729,13 @@ $("chkmeshbtn").onclick=async()=>{
 
 /* ---------------- mesh optimiser ---------------- */
 let _optTimer=null, _optSince=0, _optRunning=false, _optTrial="";
-function optAppend(lines){
-  const el=$("optlog"); if(!el||!lines||!lines.length) return;
-  el.style.display="block"; el.textContent+=lines.join("\n")+"\n"; el.scrollTop=el.scrollHeight;
+/* One line only: the panel shows the latest status; full detail is in the
+   browser console and at /api/optimise/status. */
+function optShow(text){
+  const el=$("optlog"); if(!el||!text) return;
+  el.style.display="block"; el.textContent=String(text); el.title=String(text);
 }
+function optConsole(lines){ for(const l of (lines||[])) console.info("optimise:",l); }
 function optSetBtn(on){
   const b=$("optbtn"); if(!b) return;
   b.classList.toggle("running",!!on);
@@ -1707,6 +1766,7 @@ async function optFinish(s){
   _optRunning=false; clearTimeout(_optTimer); _optTimer=null;
   optSetBtn(false); clearGroup(optGroup);
   const btn=$("optbtn"); if(btn) btn.disabled=false;
+  if(s.message) optShow(s.message);
   if(s.error){ setStat("optimise failed: "+s.error); log("optimise failed: "+s.error); }
   try{
     const g=await api("/api/read_dict");
@@ -1714,8 +1774,6 @@ async function optFinish(s){
   }catch(e){}
   try{
     await _resyncDict();
-    hideAllGreen();
-    for(const [k,v] of Object.entries(S.pins||{})) showX("g",v,k);
   }catch(e){ console.error(e); }
   if(s.result){
     applyCheckResult(s.result);
@@ -1729,8 +1787,9 @@ async function optPoll(){
   try{ s=await api("/api/optimise/status?since="+_optSince); }
   catch(e){ _optTimer=setTimeout(optPoll,2000); return; }
   _optSince=s.n||_optSince;
-  optAppend(s.log);
-  if(s.trial!==_optTrial){ _optTrial=s.trial; optShowTargets(s.targets); }
+  optConsole(s.log);
+  if(s.message) optShow(s.message);
+  _optTrial=s.trial;
   if(s.running && s.message) setStat("optimise: "+s.message+(s.score!==null&&s.score!==undefined?` · score ${Number(s.score).toFixed(1)}`:""));
   if(!s.running){ await optFinish(s); return; }
   _optTimer=setTimeout(optPoll,1000);
@@ -1738,19 +1797,19 @@ async function optPoll(){
 $("optbtn").onclick=async()=>{
   if(_optRunning){
     try{ await api("/api/optimise/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); }catch(e){}
-    optAppend(["Stop requested - finishing the current trial, then restoring the best mesh…"]);
+    optShow("stopping after the current trial…");
     return;
   }
-  const el=$("optlog"); if(el){ el.textContent=""; el.style.display="block"; }
+  optShow("starting…");
   _optSince=0; _optTrial="";
   const iters=Math.max(1,Math.min(30,parseInt($("optiter").value)||6));
   try{
     const r=await api("/api/optimise/start",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({max_iter:iters,target:$("optsurf").value,max_verts:300})});
+      body:JSON.stringify({max_iter:iters,target:"smooth",normal_edges:!!$("optnorm").checked,max_verts:300})});
     if(r.ok===false) throw new Error(r.error||"could not start");
   }catch(e){
     const m="optimise could not start: "+(e&&e.message?e.message:e);
-    setStat(m); optAppend([m]); return;
+    setStat(m); optShow(m); return;
   }
   _optRunning=true; optSetBtn(true);
   setStat("optimise: starting…");
@@ -1761,7 +1820,7 @@ $("optbtn").onclick=async()=>{
   try{
     const s=await api("/api/optimise/status?since=0");
     if(s&&s.running){
-      _optRunning=true; optSetBtn(true); optAppend(s.log); _optSince=s.n||0;
+      _optRunning=true; optSetBtn(true); optShow(s.message||"running…"); _optSince=s.n||0;
       _optTimer=setTimeout(optPoll,800);
     }
   }catch(e){}
@@ -1874,7 +1933,9 @@ $("shface").onchange=()=>{
 };
 if($("shcell")) $("shcell").onchange=()=>{
   const v=$("shcell").checked;
-  if(v) refreshBlocks(); else for(const o of cellGroup.children){ if(o.userData.cellLines) o.visible=false; }
+  if(v && !cellGroup.children.length) rebuildCellLines();
+  for(const o of cellGroup.children){ if(o.userData.cellLines) o.visible=v; }
+  if(v && !cellGroup.children.length) setStat("projected cells: no wall faces yet - mark some blocks solid first");
 };
 if($("shedge")) $("shedge").onchange=()=>{
   const v=$("shedge").checked;
@@ -1885,8 +1946,8 @@ if($("shmesh")) $("shmesh").onchange=()=>{
   const v=$("shmesh").checked;
   meshGroup.visible=v;
   if($("shhide")) $("shhide").disabled=false;
-  if(v) refreshProjectedMesh();
   applyVis();
+  if(v) refreshProjectedMesh().then(()=>{ if(S._meshMsg) setStat(S._meshMsg); });
 };
 if($("shbad")) $("shbad").onchange=()=>{
   badGroup.visible=$("shbad").checked;
@@ -2333,6 +2394,8 @@ async function _resyncDict(){
   const vs=S.vertexSel;
   if(await loadDictSurface()){
     refreshSelHL();
+    rebuildCellLines();
+    refreshProjectedMesh();
     if(vs!==null&&vs!==undefined){
       const p=_vertexPos(vs);
       if(p){ showX("w",p); showPickInfo(p,vs); }
@@ -2477,6 +2540,22 @@ async function loadSdfSurface(){
 /* Load the surface vertex grid from system/blockMeshDict so Select/Slide/etc.
    have something to pick. Needed at startup — previously only "Update
    projection" fetched it, so clicking the car never selected a vertex. */
+/* Every interface edge must be a projected polyLine: ask the server to curve any
+   that are still straight in the existing blockMeshDict. */
+async function fixStraightInterfaceEdges(){
+  if(!(S.nStraight>0)) return false;
+  try{
+    const r=await api("/api/interface_edges",{method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify({missing_only:true})});
+    if(r&&r.ok&&r.added){
+      await loadDictSurface();
+      setStat(`${r.added} straight interface edges projected onto the surface (blockMeshDict updated)`);
+      return true;
+    }
+    if(r&&r.ok===false) log("interface edges: "+(r.error||"failed"));
+  }catch(e){ log("interface edge repair failed: "+(e&&e.message?e.message:e)); }
+  return false;
+}
 async function loadDictSurface(){
   try{
     const w = await api("/api/dictwall");
@@ -2484,6 +2563,7 @@ async function loadDictSurface(){
     S.dictGrid = {x:w.x||[], y:w.y||[], z:w.z||[]};
     S.faceProj = {faceIndices:w.fidx||[], curves:w.curves||[],
                   curveIds:w.curveIds||[], bands:[]};
+    S.nStraight = w.n_straight||0;
     _surfIds=null;
     return true;
   }catch(e){ log("blockMeshDict surface unavailable: "+(e&&e.message?e.message:e)); return false; }
@@ -2525,6 +2605,7 @@ $("sldcbtn").onclick=()=>setVertexTool("slide");
     setStat("ready · loading model data…");
     await loadCar(6);
     await loadDictSurface();
+    await fixStraightInterfaceEdges();
     applyVis();
     rebuildPlanes();
     renderRows();
