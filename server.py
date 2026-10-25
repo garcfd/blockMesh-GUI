@@ -473,6 +473,126 @@ def build_interface(xs, ys, zs, solid_ov, fluid_ov, method="raycast", nlines=Non
                        "unanimous": int(vote_info.get("unanimous", 0)),
                        "voted": int(vote_info.get("voted", 0))}}
 
+# ---------------------------------------------------------------------------
+# Grading of the OUTER (live) slabs so their cells match the INNER (dead/solid)
+# blocks. Grading lives in splits.json as per-interval lines [coord, n, g]
+# (g = simpleGrading expansion ratio = last cell / first cell, increasing coord).
+# ---------------------------------------------------------------------------
+def _slab_cells(L, n, g):
+    """(first, last) cell size of a slab of length L, n cells, ratio g=last/first."""
+    n = max(int(n), 1)
+    if n == 1 or abs(g - 1.0) < 1e-12:
+        return L / n, L / n
+    q = g ** (1.0 / (n - 1))
+    first = L * (q - 1.0) / (q ** n - 1.0)
+    return first, first * g
+
+
+def _solve_growth(L, n, d):
+    """Per-cell growth t so that d*(1+t+...+t^(n-1)) = L (None if impossible)."""
+    if n < 2 or d <= 0 or L / d < 1.0 + 1e-12:
+        return None
+    target = L / d
+
+    def f(t):
+        return n if abs(t - 1.0) < 1e-12 else (t ** n - 1.0) / (t - 1.0)
+    lo, hi = 1e-3, min(1e3, 10 ** (250.0 / n))
+    if f(lo) > target or f(hi) < target:
+        return None
+    for _ in range(200):
+        mid = (lo * hi) ** 0.5
+        if f(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo * hi) ** 0.5
+
+
+def _grade_outer_lines(xs, ys, zs, solid_ov, fluid_ov, flat=False, max_ratio=100.0):
+    """New per-axis lines with the outer slabs graded to match the inner cells.
+    Returns ({"x":lines,"y":lines,"z":lines}, plan rows, summary dict)."""
+    import math
+    info = build_interface(xs, ys, zs, solid_ov, fluid_ov, "raycast", None, flat)
+    sol = [b["k"] for b in info["blocks"] if b["s"]]
+    if not sol:
+        raise ValueError("no dead (solid) blocks found - nothing to match the outer blocks to")
+    coords = {"x": sorted(xs), "y": sorted(ys), "z": sorted(zs)}
+    out, plan = {}, []
+    for a, ax in enumerate("xyz"):
+        lines = [[float(c), int(n), float(g)] for c, n, g in _resolve_lines(coords[ax], ax)]
+        idx = sorted({k[a] for k in sol})
+        lo, hi = idx[0], idx[-1]
+        ns = len(lines) - 1                                   # slabs 0..ns-1 = lines[s+1]
+
+        def slab(s):
+            return lines[s + 1][0] - lines[s][0], lines[s + 1][1], lines[s + 1][2]
+        for side, order in (("low", range(lo - 1, -1, -1)), ("high", range(hi + 1, ns))):
+            for s in order:
+                L, n, g_old = slab(s)
+                nb = s + 1 if side == "low" else s - 1        # slab next to it, towards the car
+                Lb, nbn, gb = slab(nb)
+                fb, lb = _slab_cells(Lb, nbn, gb)
+                d_adj = fb if side == "low" else lb           # cell size at the shared plane
+                row = {"axis": ax, "slab": s, "side": side, "c0": lines[s][0],
+                       "c1": lines[s + 1][0], "n": n, "old_g": g_old,
+                       "match_mm": d_adj * 1000.0, "note": ""}
+                t = _solve_growth(L, n, d_adj) if n >= 2 else None
+                if t is None:
+                    g_new = 1.0
+                    row["note"] = ("single cell" if n < 2 else
+                                   "slab shorter than the neighbouring cell" if L / max(d_adj, 1e-12) < 1.0
+                                   else "growth out of range - increase/decrease n")
+                elif t < 1.0 - 1e-9:
+                    g_new = 1.0                                # finer than the inner cells: keep uniform
+                    row["note"] = "cells already finer than the inner ones - left uniform"
+                else:
+                    g_new = t ** (n - 1) if side == "high" else t ** (-(n - 1))
+                    gmax = float(max_ratio)
+                    if g_new > gmax or g_new < 1.0 / gmax:
+                        g_new = min(max(g_new, 1.0 / gmax), gmax)
+                        row["note"] = "grading clamped to %g" % gmax
+                f_new, l_new = _slab_cells(L, n, g_new)
+                row.update({"new_g": g_new, "growth": (t if t else 1.0),
+                            "outer_mm": (f_new if side == "low" else l_new) * 1000.0,
+                            "inner_mm_after": (l_new if side == "low" else f_new) * 1000.0})
+                lines[s + 1][2] = g_new
+                plan.append(row)
+        out[ax] = lines
+    changed = sum(1 for r in plan if abs(r["new_g"] - r["old_g"]) > 1e-9)
+    worst = max([r["growth"] for r in plan] or [1.0])
+    return out, plan, {"slabs": len(plan), "changed": changed, "max_growth": worst,
+                       "dead_blocks": len(sol)}
+
+
+def _verify_grading(lines):
+    """Compare simpleGrading / cell counts in blockMeshDict with the planned lines.
+    -> (blocks checked, blocks that differ)."""
+    try:
+        txt = open(os.path.join(SYS, "blockMeshDict")).read()
+        gd = _dict_grid()
+        m = re.search(r"blocks\s*\(\s*(.*?)\n\)\s*;", txt, re.S)
+        nx1, ny1 = len(gd["x"]), len(gd["y"])
+        checked = bad = 0
+        for h in re.finditer(r"hex\s*\(([^()]+)\)\s*(?:\w+\s*)?\(([^()]+)\)\s*simpleGrading\s*\(([^()]+)\)",
+                             m.group(1)):
+            v0 = int(h.group(1).split()[0])
+            ijk = (v0 % nx1, (v0 // nx1) % ny1, v0 // (nx1 * ny1))
+            cnt = [int(float(t)) for t in h.group(2).split()]
+            try:
+                gr = [float(t) for t in h.group(3).split()]
+            except ValueError:
+                continue                                    # multi-grading: skip
+            checked += 1
+            for a, ax in enumerate("xyz"):
+                ln = lines[ax][ijk[a] + 1]
+                if cnt[a] != ln[1] or abs(gr[a] - ln[2]) > 1e-4 * max(1.0, abs(ln[2])):
+                    bad += 1
+                    break
+        return checked, bad
+    except Exception:
+        return 0, 0
+
+
 _stl_cache = {}
 _sdf_surface_cache = {}
 _lock = threading.Lock()
@@ -1015,17 +1135,172 @@ def _mesh_geometry():
     return fc, sums / np.maximum(n, 1.0)[:, None], owner
 
 
+# ---------------------------------------------------------------------------
+# Bad-element display via foamToVTK: checkMesh writes face/cell sets, foamToVTK
+# turns each one into a VTK file under <case>/VTK, and we read that geometry.
+# ---------------------------------------------------------------------------
+_VTK_FACES = {                       # VTK cell type -> faces (vertex indices)
+    12: [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)],   # hexahedron
+    10: [(0, 2, 1), (0, 1, 3), (1, 2, 3), (0, 3, 2)],                                           # tetrahedron
+    14: [(0, 3, 2, 1), (0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)],                             # pyramid
+    13: [(0, 1, 2), (3, 4, 5), (0, 1, 4, 3), (1, 2, 5, 4), (2, 0, 3, 5)],                       # wedge
+}
+
+
+def _vtk_ints(raw, pos, count, binary):
+    import numpy as np
+    if binary:
+        a = np.frombuffer(raw, dtype=">i4", count=count, offset=pos)
+        return a.astype(np.int64), pos + 4 * count
+    parts = raw[pos:].split(None, count)
+    vals = np.array(parts[:count], dtype=np.int64)
+    rest = parts[count] if len(parts) > count else b""
+    return vals, len(raw) - len(rest)
+
+
+def _vtk_read(path, cap=20000):
+    """Read a legacy VTK file (ASCII or BINARY; POLYDATA or UNSTRUCTURED_GRID) as
+    written by foamToVTK. Returns {"tris": flat xyz list, "centres": [[x,y,z]..],
+    "count": number of faces/cells in the file}."""
+    import numpy as np
+    raw = open(path, "rb").read()
+    if not raw.startswith(b"# vtk"):
+        raise ValueError("not a legacy VTK file (XML .vtp/.vtu are not supported)")
+    binary = b"BINARY" in raw[:300].upper().split(b"DATASET")[0]
+    pos = raw.index(b"DATASET")
+    kw = re.compile(rb"(POINTS|POLYGONS|CELLS|CELL_TYPES|POINT_DATA|CELL_DATA)[ \t]*([^\n]*)\n")
+    P = polys = cells = ctypes = None
+    while True:
+        m = kw.search(raw, pos)
+        if not m:
+            break
+        k, args, pos = m.group(1), m.group(2).split(), m.end()
+        if k in (b"POINT_DATA", b"CELL_DATA"):
+            break
+        if k == b"POINTS":
+            n = int(args[0])
+            dt = np.dtype(">f8" if len(args) > 1 and args[1] == b"double" else ">f4")
+            if binary:
+                a = np.frombuffer(raw, dtype=dt, count=3 * n, offset=pos)
+                pos += 3 * n * dt.itemsize
+            else:
+                parts = raw[pos:].split(None, 3 * n)
+                a = np.array(parts[:3 * n], dtype=float)
+                pos = len(raw) - len(parts[3 * n] if len(parts) > 3 * n else b"")
+            P = a.astype(float).reshape(-1, 3)
+        elif k in (b"POLYGONS", b"CELLS"):
+            n, size = int(args[0]), int(args[1])
+            a, pos = _vtk_ints(raw, pos, size, binary)
+            if k == b"POLYGONS":
+                polys = (n, a)
+            else:
+                cells = (n, a)
+        elif k == b"CELL_TYPES":
+            n = int(args[0])
+            ctypes, pos = _vtk_ints(raw, pos, n, binary)
+    if P is None:
+        raise ValueError("no POINTS in VTK file")
+    tris, centres, count = [], [], 0
+
+    def add_face(ids):
+        nonlocal tris
+        for i in range(1, len(ids) - 1):
+            tris.extend(P[ids[0]].tolist() + P[ids[i]].tolist() + P[ids[i + 1]].tolist())
+
+    def entries(n, a):
+        p = 0
+        for _ in range(n):
+            c = int(a[p])
+            yield a[p + 1:p + 1 + c]
+            p += 1 + c
+    if polys is not None:                                   # POLYDATA: each polygon = one face
+        for ids in entries(*polys):
+            count += 1
+            if len(centres) < cap:
+                add_face(ids)
+                centres.append(P[ids].mean(axis=0).tolist())
+    elif cells is not None:                                 # UNSTRUCTURED_GRID
+        for ci, ids in enumerate(entries(*cells)):
+            count += 1
+            if len(centres) >= cap:
+                continue
+            t = int(ctypes[ci]) if ctypes is not None and ci < len(ctypes) else 12
+            if t in (5, 7, 9):                              # a single face
+                add_face(ids)
+            elif t == 42:                                   # polyhedron: [nFaces, n0, ids.., n1, ids..]
+                nf, q = int(ids[0]), 1
+                for _f in range(nf):
+                    c = int(ids[q]); add_face(ids[q + 1:q + 1 + c]); q += 1 + c
+            elif t in _VTK_FACES:
+                for f in _VTK_FACES[t]:
+                    add_face([ids[j] for j in f])
+            else:
+                continue
+            centres.append(P[ids].mean(axis=0).tolist() if t != 42 else P[np.unique(ids[1:])].mean(axis=0).tolist())
+    else:
+        raise ValueError("VTK file has no POLYGONS or CELLS")
+    return {"tris": [round(x, 5) for x in tris], "centres": centres, "count": count}
+
+
+def _set_is_cell(path):
+    """True for a cellSet file, False for a faceSet (from its FoamFile header)."""
+    try:
+        head = open(path, "rb").read(600).decode("latin-1")
+        return bool(re.search(r"class\s+cellSet", head))
+    except OSError:
+        return False
+
+
+def _foam_to_vtk(name, is_cell):
+    """foamToVTK -faceSet/-cellSet <name>; returns the newest VTK file made for it
+    (None if nothing was produced) plus the command output."""
+    import time as _time
+    opt = "-cellSet" if is_cell else "-faceSet"
+    t0 = _time.time() - 1.0
+    code, out = run(["bash", "-lc",
+                     "source /opt/openfoam12/etc/bashrc; "
+                     f"cd {CASE}; "
+                     f"o=$(foamToVTK -ascii -noInternal -noBoundary -noFaceZones -noLagrangian "
+                     f"-noPointValues {opt} {name} 2>&1) "
+                     f"|| o=$(foamToVTK -ascii {opt} {name} 2>&1) "
+                     f"|| o=$(foamToVTK {opt} {name} 2>&1); echo \"$o\""], timeout=900)
+    hits = []
+    for root, _d, files in os.walk(os.path.join(CASE, "VTK")):
+        for f in files:
+            p = os.path.join(root, f)
+            if name in p and f.endswith(".vtk"):
+                try:
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    continue
+                if mt >= t0:
+                    hits.append((mt, p))
+    hits.sort()
+    return (hits[-1][1] if hits else None), out
+
+
+_SET_KINDS = (          # key, slot in the response, candidate set names, label
+    ("negvol",   "cells",    ["negativeVolumeCells", "zeroVolumeCells"], "negative volume cells"),
+    ("nonortho", "nonortho", ["nonOrthoFaces"],                          "non-orthogonal faces (severe)"),
+    ("skew",     "skew",     ["skewFaces"],                              "highly skew faces"),
+    ("pyramid",  "pyramids", ["wrongOrientedFaces"],                     "face pyramid errors"),
+    ("aspect",   "aspect",   ["highAspectRatioCells"],                   "high aspect ratio cells"),
+)
+
+
 def _checkmesh_run():
-    """Run checkMesh on the current constant/polyMesh and return the result dict
-    served by /api/checkmesh (counts, issues, problem locations and geometry)."""
+    """Run checkMesh, turn each bad-element set it wrote into VTK with foamToVTK,
+    read that geometry, and return the dict served by /api/checkmesh."""
     import re as _re
-    # OpenFOAM 12 wants "-writeSets <format>"; older/other builds take a bare flag
-    # or none at all. Try them in turn; the bad-element sets are written anyway.
+    # -allGeometry also checks aspect ratio. OpenFOAM 12 wants "-writeSets <format>";
+    # other builds take a bare flag or none: try them in turn (sets are written anyway).
+    flags = "-allGeometry -allTopology"
     code, log = run(["bash", "-lc",
                      "source /opt/openfoam12/etc/bashrc; "
                      f"cd {CASE}; rm -rf constant/polyMesh/sets; "
-                     "out=$(checkMesh -writeSets vtk 2>&1) "
-                     "|| out=$(checkMesh -writeSets 2>&1) "
+                     f"out=$(checkMesh {flags} -writeSets vtk 2>&1) "
+                     f"|| out=$(checkMesh {flags} -writeSets 2>&1) "
+                     f"|| out=$(checkMesh {flags} 2>&1) "
                      "|| out=$(checkMesh 2>&1); echo \"$out\""], timeout=900)
 
     def _num(pat):
@@ -1041,122 +1316,146 @@ def _checkmesh_run():
     mesh_ok = (("Mesh OK" in log) and ("Failed" not in log)
                and "Error in face pyramids" not in log)
     setdir = os.path.join(CASE, "constant", "polyMesh", "sets")
-    # Set names: believe what checkMesh says it wrote, else the usual names.
-    names = {"cells": "zeroVolumeCells", "nonortho": "nonOrthoFaces",
-             "skew": "skewFaces", "pyramids": "wrongOrientedFaces"}
-    for _n, desc, nm in _re.findall(
-            r"Writing\s+(\d+)\s+([^\n]*?)\s+to set\s+(\w+)", log):
-        d = desc.lower()
-        if "zero" in d or "negative" in d or "volume" in d:
-            names["cells"] = nm
-        elif "non-orth" in d or "nonorth" in d:
-            names["nonortho"] = nm
-        elif "skew" in d:
-            names["skew"] = nm
-        elif "orient" in d or "pyramid" in d:
-            names["pyramids"] = nm
+    notes, srcs = [], {}
 
-    def _set(name):
-        _q = os.path.join(setdir, name)
-        return _read_cell_set(_q) if os.path.exists(_q) else []
-    idx = _set(names["cells"])        # cells (negative / zero volume)
-    nof = _set(names["nonortho"])     # faces (severely non-orthogonal)
-    skf = _set(names["skew"])         # faces (highly skew)
-    pyf = _set(names["pyramids"])     # faces (error in face pyramids)
-    notes = []
-    computed = set()
-    # checkMesh only writes a set for some failures (e.g. a face set for severely
-    # non-orthogonal faces is NOT written while they are just a warning). When the
-    # log reports a problem but there is no set, work the faces out from the mesh.
+    # ---- which set file belongs to which check ---------------------------------
+    logged = {}
+    for _n, desc, nm in _re.findall(r"Writing\s+(\d+)\s+([^\n]*?)\s+to set\s+(\w+)", log):
+        d = desc.lower()
+        if "aspect" in d:
+            logged["aspect"] = nm
+        elif "zero" in d or "negative" in d or "volume" in d:
+            logged["negvol"] = nm
+        elif "non-orth" in d or "nonorth" in d:
+            logged["nonortho"] = nm
+        elif "skew" in d:
+            logged["skew"] = nm
+        elif "orient" in d or "pyramid" in d:
+            logged["pyramid"] = nm
+    setname, setpath = {}, {}
+    for key, slot, cands, label in _SET_KINDS:
+        for nm in ([logged[key]] if key in logged else []) + cands:
+            p = os.path.join(setdir, nm)
+            if os.path.exists(p):
+                setname[key], setpath[key] = nm, p
+                break
+
+    # ---- geometry: foamToVTK -> VTK file -> read ---------------------------------
+    geo = {}                                   # key -> {"tris","centres","count"}
+    for key, slot, cands, label in _SET_KINDS:
+        if key not in setpath:
+            continue
+        try:
+            vtk, out = _foam_to_vtk(setname[key], _set_is_cell(setpath[key]))
+            if not vtk:
+                notes.append("foamToVTK made no VTK file for set '%s': %s" % (
+                    setname[key], " | ".join(out.strip().splitlines()[-2:]) or "no output"))
+                continue
+            geo[key] = _vtk_read(vtk)
+            srcs[key] = "vtk"
+        except Exception as e:
+            notes.append("could not read VTK for '%s': %r" % (setname[key], e))
+
+    # ---- fall back to the polyMesh files for anything VTK did not give ---------------
+    ids = {k: (_read_cell_set(setpath[k]) if k in setpath else []) for k, *_ in _SET_KINDS}
+    for k in list(ids):
+        if k in geo:
+            ids[k] = []                        # already have the geometry
     nonortho_max = _flt(r"Mesh non-orthogonality Max:\s*([-+.\deE]+)")
     skew_max = _flt(r"Max skewness\s*=\s*([-+.\deE]+)")
-    want_neg = bool(_num(r"negative volume cells:\s*(\d+)")) and not idx
-    want_non = bool(_num(r"severely non-orthogonal[^\n]*:\s*(\d+)")
-                    or (nonortho_max and nonortho_max > 70.0)) and not nof
-    want_skw = bool(_num(r"(\d+)\s+highly skew faces detected")
-                    or (skew_max and skew_max > 4.0)) and not skf
-    want_pyr = bool(_num(r"(?i)error in face pyramids:\s*(\d+)")) and not pyf
-    if want_neg or want_non or want_skw or want_pyr:
+    want = {
+        "negvol": bool(_num(r"negative volume cells:\s*(\d+)")) and "negvol" not in geo and not ids["negvol"],
+        "nonortho": bool(_num(r"severely non-orthogonal[^\n]*:\s*(\d+)")
+                         or (nonortho_max and nonortho_max > 70.0))
+                    and "nonortho" not in geo and not ids["nonortho"],
+        "skew": bool(_num(r"(\d+)\s+highly skew faces detected")
+                     or (skew_max and skew_max > 4.0)) and "skew" not in geo and not ids["skew"],
+        "pyramid": bool(_num(r"(?i)error in face pyramids:\s*(\d+)"))
+                   and "pyramid" not in geo and not ids["pyramid"],
+    }
+    if any(want.values()):
+        # checkMesh writes no set for some warnings (e.g. severe non-orthogonality):
+        # work the faces out from the mesh itself.
         try:
             qm = _mesh_quality()
-            if want_neg and qm["neg"]:
-                idx = qm["neg"]; computed.add("negvol")
-            if want_non and qm["nonortho"]:
-                nof = qm["nonortho"]; computed.add("nonortho")
-            if want_skw and qm["skew"]:
-                skf = qm["skew"]; computed.add("skew")
-            if want_pyr and qm["pyr"]:
-                pyf = qm["pyr"]; computed.add("pyramid")
+            for key, qk in (("negvol", "neg"), ("nonortho", "nonortho"),
+                            ("skew", "skew"), ("pyramid", "pyr")):
+                if want[key] and qm[qk]:
+                    ids[key] = qm[qk]
+                    srcs[key] = "computed"
         except Exception as e:
             notes.append("could not work out the problem faces from the mesh: " + repr(e))
-    cells, nonortho, skew, pyramids = [], [], [], []
-    tris, geom_error = {}, None
-    if idx or nof or skf or pyf:
+    pm = {}                                    # polyMesh-derived centres + triangles
+    if any(ids.values()):
         try:
             fc, cc, owner = _mesh_geometry()
-            cells = [{"i": int(i), "c": [float(v) for v in cc[i]]}
-                     for i in idx if 0 <= i < len(cc)]
+            pm["fc"], pm["cc"] = fc, cc
+            pm["tris"] = _problem_tris(ids["negvol"], ids["nonortho"], ids["skew"], ids["pyramid"])
+            pm["tris"]["aspect"] = (_problem_tris(ids["aspect"], [], [], [])["cells"]
+                                    if ids["aspect"] else [])
+        except Exception as e:
+            notes.append("could not read the mesh geometry: " + repr(e))
 
-            def _faces(fl):
-                return [{"i": int(f), "c": [float(v) for v in fc[f]]}
-                        for f in fl if 0 <= f < len(fc)]
-            nonortho, skew, pyramids = _faces(nof), _faces(skf), _faces(pyf)
-        except Exception as e:
-            geom_error = "locations: " + repr(e)
-        try:
-            tris = _problem_tris(idx, nof, skf, pyf)
-        except Exception as e:
-            geom_error = (geom_error + "; " if geom_error else "") + "geometry: " + repr(e)
-    n_cells = (_num(r"(?m)^\s*cells:\s*(\d+)\s*$")
-               or _num(r"(?m)^\s*cells\s*[:=]\s*(\d+)"))
-    # Counts: trust checkMesh's own log line, fall back to the set size.
-    n_bad = _num(r"negative volume cells:\s*(\d+)") or len(idx)
-    n_nonortho = (_num(r"severely non-orthogonal[^\n]*:\s*(\d+)")
-                  or len(nof))
-    n_skew = _num(r"(\d+)\s+highly skew faces detected") or len(skf)
-    n_pyr = (_num(r"(?i)error in face pyramids:\s*(\d+)") or len(pyf))
-    for _n, _lst, _nm, _lab in ((n_bad, idx, names["cells"], "negative-volume cells"),
-                                (n_nonortho, nof, names["nonortho"], "non-orthogonal faces"),
-                                (n_skew, skf, names["skew"], "highly skew faces"),
-                                (n_pyr, pyf, names["pyramids"], "face pyramid errors")):
-        if _n and not _lst:
-            notes.append("checkMesh reports %d %s but set '%s' was not written/read - "
-                         "nothing to display" % (_n, _lab, _nm))
+    cells, nonortho, skew, pyramids, aspect = [], [], [], [], []
+    lists = {"negvol": cells, "nonortho": nonortho, "skew": skew, "pyramid": pyramids,
+             "aspect": aspect}
+    tris = {"cells": [], "nonortho": [], "skew": [], "pyramids": [], "aspect": []}
+    tri_key = {"negvol": "cells", "nonortho": "nonortho", "skew": "skew",
+               "pyramid": "pyramids", "aspect": "aspect"}
+    for key, slot, cands, label in _SET_KINDS:
+        if key in geo:
+            g = geo[key]
+            tris[slot] = g["tris"]
+            lists[key].extend({"i": n, "c": c} for n, c in enumerate(g["centres"]))
+        elif ids.get(key) and "tris" in pm:
+            tris[slot] = pm["tris"].get(tri_key.get(key, ""), [])
+            ctr = pm["cc"] if key in ("negvol", "aspect") else pm["fc"]
+            lists[key].extend({"i": int(i), "c": [float(v) for v in ctr[i]]}
+                              for i in ids[key] if 0 <= i < len(ctr))
+
+    # ---- counts: trust checkMesh's own log line, else what we found ----------------------
+    n_cells = (_num(r"(?m)^\s*cells:\s*(\d+)\s*$") or _num(r"(?m)^\s*cells\s*[:=]\s*(\d+)"))
+
+    def found(key):
+        return geo[key]["count"] if key in geo else len(ids.get(key, []))
+    n = {
+        "negvol": _num(r"negative volume cells:\s*(\d+)") or found("negvol"),
+        "nonortho": _num(r"severely non-orthogonal[^\n]*:\s*(\d+)") or found("nonortho"),
+        "skew": _num(r"(\d+)\s+highly skew faces detected") or found("skew"),
+        "pyramid": _num(r"(?i)error in face pyramids:\s*(\d+)") or found("pyramid"),
+        "aspect": (_num(r"(?i)High aspect ratio cells found[^\n]*?number of cells\s+(\d+)")
+                   or found("aspect")),
+    }
+    maxv = {
+        "negvol": _flt(r"Minimum negative volume:\s*([-+.\deE]+)"),
+        "nonortho": nonortho_max,
+        "skew": skew_max,
+        "pyramid": None,
+        "aspect": _flt(r"(?i)Max aspect ratio\s*[:=]\s*([-+.\deE]+)"),
+    }
+    for key, slot, cands, label in _SET_KINDS:
+        if n[key] and not (lists[key] or tris[slot]):
+            notes.append("checkMesh reports %d %s but no geometry could be read for them "
+                         "(set '%s' %s)" % (n[key], label, setname.get(key, cands[0]),
+                                            "found" if key in setpath else "not written"))
     if not _re.search(r"Mesh OK|Failed \d+ mesh checks|\bcells:", log):
         notes.append("checkMesh output not recognised - see the log: " + " | ".join(
             log.strip().splitlines()[-2:]))
-    issues = [
-        {"key": "negvol", "label": "negative volume cells",
-         "n": n_bad, "max": _flt(r"Minimum negative volume:\s*([-+.\deE]+)"),
-         "src": "computed" if "negvol" in computed else "set"},
-        {"key": "nonortho", "label": "non-orthogonal faces (severe)",
-         "n": n_nonortho,
-         "max": _flt(r"Mesh non-orthogonality Max:\s*([-+.\deE]+)"),
-         "src": "computed" if "nonortho" in computed else "set"},
-        {"key": "skew", "label": "highly skew faces",
-         "n": n_skew, "max": _flt(r"Max skewness\s*=\s*([-+.\deE]+)"),
-         "src": "computed" if "skew" in computed else "set"},
-        {"key": "pyramid", "label": "face pyramid errors",
-         "n": n_pyr, "max": None,
-         "src": "computed" if "pyramid" in computed else "set"},
-    ]
+    issues = [{"key": key, "label": label, "n": n[key], "max": maxv[key],
+               "src": srcs.get(key, "set")} for key, slot, cands, label in _SET_KINDS]
     return ({"ok": True,
-                       "log": "\n".join(log.strip().splitlines()[-30:]),
-                       "mesh_ok": mesh_ok,
-                       "n_cells": n_cells,
-                       "n_bad": n_bad,
-                       "n_severe_nonortho": n_nonortho,
-                       "n_nonortho": n_nonortho,
-                       "n_skew": n_skew,
-                       "n_pyramid": n_pyr,
-                       "issues": issues,
-                       "cells": cells,
-                       "nonortho": nonortho,
-                       "skew": skew,
-                       "pyramids": pyramids,
-                       "tris": tris,
-                       "geom_error": geom_error,
-                       "notes": notes})
+             "log": "\n".join(log.strip().splitlines()[-30:]),
+             "mesh_ok": mesh_ok,
+             "n_cells": n_cells,
+             "n_bad": n["negvol"], "n_severe_nonortho": n["nonortho"],
+             "n_nonortho": n["nonortho"], "n_skew": n["skew"],
+             "n_pyramid": n["pyramid"], "n_aspect": n["aspect"],
+             "issues": issues,
+             "cells": cells, "nonortho": nonortho, "skew": skew,
+             "pyramids": pyramids, "aspect": aspect,
+             "tris": tris,
+             "geom_error": None,
+             "notes": notes})
 
 
 # ---------------------------------------------------------------------------
@@ -1169,7 +1468,8 @@ _opt = {"running": False, "cancel": False, "done": False, "log": [], "iter": 0,
         "message": "", "result": None, "error": None, "cancelled": False}
 _OPT_BLOCKED = ("/api/pinpatch", "/api/unpin", "/api/export", "/api/blockMesh",
                 "/api/checkmesh", "/api/modify", "/api/saveover", "/api/savepins",
-                "/api/interface", "/api/interface_edges", "/api/sdf/build")
+                "/api/interface", "/api/interface_edges", "/api/grade_outer",
+                "/api/sdf/build")
 
 
 def _opt_running():
@@ -2050,14 +2350,16 @@ class H(BaseHTTPRequestHandler):
                         _pins = _sd.get("pins", {})
                         _solid = _sd.get("solid", [])
                         _fluid = _sd.get("fluid", [])
+                        _auto = bool(_sd.get("auto_grade", False))
                     except (OSError, ValueError):
-                        _pins, _solid, _fluid = {}, [], []
+                        _pins, _solid, _fluid, _auto = {}, [], [], False
                     return self._json({"x": [float(v) for v in found["x"]],
                                        "y": [float(v) for v in found["y"]],
                                        "z": [float(v) for v in found["z"]],
                                        "pins": _pins if isinstance(_pins, dict) else {},
                                        "solid": _solid if isinstance(_solid, list) else [],
                                        "fluid": _fluid if isinstance(_fluid, list) else [],
+                                       "auto_grade": _auto,
                                        "source": "blockMeshDict"})
                 with open(os.path.join(SYS, "splits.json")) as f:
                     d = json.load(f)
@@ -2180,6 +2482,10 @@ class H(BaseHTTPRequestHandler):
                             payload[_k] = _stored
                 except (TypeError, ValueError, KeyError):
                     pass
+            if "auto_grade" in _old:
+                payload["auto_grade"] = _old["auto_grade"]
+            if "auto_grade" in data:
+                payload["auto_grade"] = bool(data["auto_grade"])
             if "snap_all" in _old:
                 payload["snap_all"] = _old["snap_all"]
             if "snap_all" in data:
@@ -2193,6 +2499,16 @@ class H(BaseHTTPRequestHandler):
                     payload[_k] = _veto_boundary_pins(data[_k], _old)
                 elif _k in _old:
                     payload[_k] = _veto_boundary_pins(_old[_k], _old)
+            grading = None
+            if payload.get("auto_grade"):
+                # outer blocks stay graded to match the inner (dead) blocks
+                try:
+                    _gl, _gp, grading = _grade_outer_lines(
+                        xs, ys, zs, solid_ov, fluid_ov, bool(payload.get("flat", False)))
+                    for _ax in "xyz":
+                        payload[_ax + "_lines"] = _gl[_ax]
+                except Exception as e:
+                    grading = {"error": str(e)}
             with open(os.path.join(SYS, "splits.json"), "w") as f:
                 json.dump(payload, f)
             code, log = run([sys.executable, GENERATOR], timeout=600)
@@ -2200,6 +2516,8 @@ class H(BaseHTTPRequestHandler):
             if code != 0:
                 return self._json({"ok": False, "log": tail})
             out = {"ok": True, "log": tail}
+            if grading is not None:
+                out["grading"] = grading
             # whatever the generator left straight on the interface is curved now
             out["interface_edges"] = _refresh_interface_edges(None, missing_only=True)
             if data.get("runMesh"):
@@ -2412,6 +2730,87 @@ class H(BaseHTTPRequestHandler):
             _ie = _refresh_interface_edges({_vi})
             return self._json({"ok": True, "vid": _vi, "point": _base,
                                "interface_edges": _ie})
+        if u.path == "/api/grade_outer":
+            # {apply: bool=true, auto: bool?, max_ratio: number=100}
+            try:
+                _p = os.path.join(SYS, "splits.json")
+                cur = json.load(open(_p))
+                _gx, _gy, _gz = (sorted(float(v) for v in cur[k]) for k in ("x", "y", "z"))
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                return self._json({"ok": False, "error": f"no splits.json: {e}"}, 400)
+            if data.get("reset"):
+                # grading switched OFF: the outer slabs go back to the generator's
+                # default grading; every cell count stays as it is.
+                _co = {"x": _gx, "y": _gy, "z": _gz}
+                try:
+                    _, _plan0, _ = _grade_outer_lines(
+                        _gx, _gy, _gz, _clean_triples(cur.get("solid", [])),
+                        _clean_triples(cur.get("fluid", [])), bool(cur.get("flat", False)))
+                except Exception:
+                    _plan0 = []
+                _lines = {ax: _resolve_lines(_co[ax], ax) for ax in "xyz"}
+                _reset = 0
+                for row in _plan0:
+                    auto_g = float(_auto_lines(_co[row["axis"]], row["axis"])[row["slab"]][1])
+                    ln = _lines[row["axis"]][row["slab"] + 1]
+                    if abs(ln[2] - auto_g) > 1e-12:
+                        ln[2] = auto_g
+                        _reset += 1
+                cur["auto_grade"] = False
+                for _ax in "xyz":
+                    cur[_ax + "_lines"] = _lines[_ax]
+                try:
+                    import shutil
+                    shutil.copy(_p, _p + ".before_grade")
+                except OSError:
+                    pass
+                _backup_dict()
+                with open(_p, "w") as f:
+                    json.dump(cur, f)
+                code, log = run([sys.executable, GENERATOR], timeout=600)
+                if code != 0:
+                    return self._json({"ok": False, "error": "generator failed",
+                                       "log": "\n".join(log.strip().splitlines()[-14:])})
+                _ie = _refresh_interface_edges(None, missing_only=True)
+                _chk, _bad = _verify_grading(_lines)
+                return self._json({"ok": True, "applied": True, "reset": _reset, "auto": False,
+                                   "verify": {"blocks": _chk, "differ": _bad},
+                                   "interface_edges": _ie})
+            try:
+                _mr = float(data.get("max_ratio", 100.0))
+                _gl, _plan, _sum = _grade_outer_lines(
+                    _gx, _gy, _gz, _clean_triples(cur.get("solid", [])),
+                    _clean_triples(cur.get("fluid", [])), bool(cur.get("flat", False)), _mr)
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)}, 400)
+            if "auto" in data:
+                cur["auto_grade"] = bool(data["auto"])
+            if not data.get("apply", True):
+                if "auto" in data:
+                    with open(_p, "w") as f:
+                        json.dump(cur, f)
+                return self._json({"ok": True, "applied": False, "plan": _plan, "summary": _sum,
+                                   "auto": bool(cur.get("auto_grade", False))})
+            try:
+                import shutil
+                shutil.copy(_p, _p + ".before_grade")
+            except OSError:
+                pass
+            _backup_dict()
+            for _ax in "xyz":
+                cur[_ax + "_lines"] = _gl[_ax]
+            with open(_p, "w") as f:
+                json.dump(cur, f)
+            code, log = run([sys.executable, GENERATOR], timeout=600)
+            tail = "\n".join(log.strip().splitlines()[-14:])
+            if code != 0:
+                return self._json({"ok": False, "error": "generator failed", "log": tail})
+            _ie = _refresh_interface_edges(None, missing_only=True)
+            _chk, _bad = _verify_grading(_gl)
+            return self._json({"ok": True, "applied": True, "plan": _plan, "summary": _sum,
+                               "auto": bool(cur.get("auto_grade", False)),
+                               "verify": {"blocks": _chk, "differ": _bad},
+                               "interface_edges": _ie, "log": tail})
         if u.path == "/api/interface_edges":
             # {missing_only: bool=true}: make every interface edge a projected polyLine
             _backup_dict()
@@ -2472,6 +2871,14 @@ class H(BaseHTTPRequestHandler):
             if _nc[2]:
                 _lz[_k + 1][1] = _nc[2]
             cur["x_lines"], cur["y_lines"], cur["z_lines"] = _lx, _ly, _lz
+            if cur.get("auto_grade"):
+                try:
+                    _gl, _gp, _gs = _grade_outer_lines(
+                        _bx, _by, _bz, _clean_triples(cur.get("solid", [])),
+                        _clean_triples(cur.get("fluid", [])), bool(cur.get("flat", False)))
+                    cur["x_lines"], cur["y_lines"], cur["z_lines"] = _gl["x"], _gl["y"], _gl["z"]
+                except Exception:
+                    pass
             with open(_p, "w") as f:
                 json.dump(cur, f)
             code, log = run([sys.executable, GENERATOR], timeout=600)
