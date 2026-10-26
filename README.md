@@ -16,7 +16,7 @@
 
 Details, what to leave out, and how to run are below.
 
-A browser GUI for splitting, projecting and optimising a car `blockMeshDict`
+A browser GUI for splitting, projecting and grading a car `blockMeshDict`
 (OpenFOAM 12). The server is Python standard library plus numpy.
 
 ## Commit these
@@ -57,6 +57,7 @@ system/blockMeshDict.before_optimise
 system/splits.json.before_optimise
 constant/polyMesh/                 blockMesh output
 constant/C, Ccx, Ccy, Ccz          temporary cell-centre files
+VTK/                               foamToVTK output (bad-cell/face sets read by the GUI)
 /tmp/*.log                         error logs
 ```
 
@@ -71,6 +72,8 @@ system/*.before_optimise
 splits.json.before_optimise
 constant/polyMesh/
 constant/C*
+VTK/
+postProcessing/
 __pycache__/
 ```
 
@@ -86,7 +89,7 @@ python3 gui/server.py 8765        # then open http://localhost:8765
 ```
 
 Needs Python 3 with numpy, and OpenFOAM 12 installed at
-`/opt/openfoam12` (blockMesh and checkMesh are run through
+`/opt/openfoam12` (blockMesh, checkMesh and foamToVTK are run through
 `source /opt/openfoam12/etc/bashrc`).
 
 ## Typical workflow
@@ -96,9 +99,12 @@ Needs Python 3 with numpy, and OpenFOAM 12 installed at
 3. **Update projection** – project the surface vertices onto the car.
 4. Fix single vertices with **Select / Slide vertex**, **Nearest surface**
    (snaps to the STL), **Smooth surface** (snaps to the distance-field mesh)
-   and **Undo projection**.
-5. **Run blockMesh**, then **Run checkMesh**. Problem cells and faces show in
+   and **Undo projection**. 
+   The **Undo** / **Redo** buttons at the top of the left panel (also Ctrl+Z / Ctrl+Y)
+   step back and forward through everything: splits, live/dead blocks, block cell
+   counts and these vertex moves.
+5. **grading** switch (Blocks panel): *off* (generator default), *block grading* (one ratio per direction per block, outer slabs matched to the inner cell size) or *edge grading* (every edge of the live region gets its own ratio from the cell sizes at its two ends; written as `edgeGrading`). The chosen mode is re-applied on every write.
+6. **Run blockMesh**, then **Run checkMesh**. Problem cells and faces show in
    the visibility list: negative volume (red), non-orthogonal (orange),
-   highly skew (light green), face pyramid errors (cyan).
-6. **Optimise mesh** – moves surface vertices near problems, keeping them on
-   the surface, and keeps a change only if checkMesh improves. Click again to stop.
+   highly skew (light green), face pyramid errors (cyan), high aspect ratio
+   (purple).
