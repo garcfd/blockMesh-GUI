@@ -593,6 +593,248 @@ def _verify_grading(lines):
         return 0, 0
 
 
+# ---------------------------------------------------------------------------
+# EDGE grading: instead of one simpleGrading ratio per direction per block, every
+# grid edge of the live region gets its own expansion ratio (blockMesh edgeGrading),
+# worked out from the cell sizes at its two ends. A grid edge has ONE ratio that every
+# block touching it uses, so neighbouring blocks stay conforming.
+# ---------------------------------------------------------------------------
+_HEX_EDGES = [(0, 1), (3, 2), (7, 6), (4, 5),          # x-direction  (blockMesh order)
+              (0, 3), (1, 2), (5, 6), (4, 7),          # y-direction
+              (0, 4), (1, 5), (2, 6), (3, 7)]          # z-direction
+
+
+def _g_for_cell(L, n, target, which, R):
+    """Grading g (= last/first) for which the first (which="first") or last
+    ("last") cell of an n-cell, length-L edge equals `target`; clamped to [1/R, R]."""
+    import math
+    if n < 2:
+        return 1.0
+    pick = 0 if which == "first" else 1
+    f = lambda lg: _slab_cells(L, n, math.exp(lg))[pick]
+    lo, hi = -math.log(R), math.log(R)
+    if which == "first":                       # first cell shrinks as g grows
+        if target >= f(lo):
+            return 1.0 / R
+        if target <= f(hi):
+            return R
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if f(mid) > target else (lo, mid)
+    else:                                      # last cell grows with g
+        if target <= f(lo):
+            return 1.0 / R
+        if target >= f(hi):
+            return R
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if f(mid) < target else (lo, mid)
+    return math.exp(0.5 * (lo + hi))
+
+
+def _line_ratios(edges, R=100.0):
+    """Ratios for the live edges of one grid line. edges = [{"n","L","kind","g0"}] in
+    increasing coordinate order, kind being
+      "dead"  - all neighbouring blocks are dead (inner, not meshed): fixes the cell size,
+      "wall"  - live edge on the car surface (borders a dead block): keeps its own grading g0
+                and so keeps the inner cell size,
+      "free"  - all neighbouring blocks live: graded here.
+    A free edge next to a dead/wall edge continues from that cell (exact match), and the
+    chain carries on outward; a free edge no dead/wall edge reaches is graded by the ratio of
+    the cell sizes at its two ends. Returns (ratios, how); how = "anchor" | "ends" | "wall"."""
+    import math
+    m = len(edges)
+    d = [e["L"] / max(e["n"], 1) for e in edges]
+    fixed = [e["kind"] != "free" for e in edges]
+    cells = [(_slab_cells(e["L"], e["n"], e["g0"]) if fixed[i] else None)
+             for i, e in enumerate(edges)]
+    fwd, bwd = [None] * m, [None] * m
+    cur = None
+    for e in range(m):                         # from the low side, anchored at fixed edges
+        if fixed[e]:
+            cur = cells[e][1]
+            continue
+        if cur is None:
+            continue
+        E = edges[e]
+        g = _g_for_cell(E["L"], E["n"], cur, "first", R)
+        fwd[e] = g
+        cur = _slab_cells(E["L"], E["n"], g)[1]
+    cur = None
+    for e in range(m - 1, -1, -1):             # from the high side
+        if fixed[e]:
+            cur = cells[e][0]
+            continue
+        if cur is None:
+            continue
+        E = edges[e]
+        g = _g_for_cell(E["L"], E["n"], cur, "last", R)
+        bwd[e] = g
+        cur = _slab_cells(E["L"], E["n"], g)[0]
+    sv = []                                    # mean-rule size at every vertex
+    for v in range(m + 1):
+        if v == 0:
+            sv.append(d[0])
+        elif v == m:
+            sv.append(d[m - 1])
+        else:
+            sv.append(math.sqrt(d[v - 1] * d[v]))
+    ratios, how = [1.0] * m, [""] * m
+    for e in range(m):
+        E = edges[e]
+        if E["kind"] == "dead":
+            continue
+        if E["kind"] == "wall":
+            ratios[e], how[e] = min(max(E["g0"], 1.0 / R), R), "wall"
+            continue
+        if fwd[e] is not None and bwd[e] is not None:
+            r, h = math.sqrt(fwd[e] * bwd[e]), "anchor"
+        elif fwd[e] is not None:
+            r, h = fwd[e], "anchor"
+        elif bwd[e] is not None:
+            r, h = bwd[e], "anchor"
+        else:
+            r, h = sv[e + 1] / sv[e], "ends"
+        ratios[e] = min(max(r, 1.0 / R), R) if E["n"] > 1 else 1.0
+        how[e] = h
+    return ratios, how
+
+
+def _apply_edge_grading(R=100.0):
+    """Rewrite every live block's grading in blockMeshDict as edgeGrading (12 ratios)
+    from the cell sizes at the ends of each edge. Idempotent; never raises."""
+    import numpy as np
+    try:
+        dp = os.path.join(SYS, "blockMeshDict")
+        txt = open(dp).read()
+        gd = _dict_grid()
+        if gd is None:
+            return {"ok": False, "error": "no grid"}
+        coords = {a: gd[a] for a in "xyz"}
+        lines = {a: _resolve_lines(coords[a], a) for a in "xyz"}
+        N = [len(coords[a]) - 1 for a in "xyz"]
+        nx1, ny1 = len(coords["x"]), len(coords["y"])
+        dec = lambda v: (v % nx1, (v // nx1) % ny1, v // (nx1 * ny1))
+        vid = lambda i, j, k: i + nx1 * (j + ny1 * k)
+        vm = re.search(r"vertices\s*\(\s*(.*?)\)\s*;\s*blocks", txt, re.S)
+        V = np.array([[float(x) for x in t.split()]
+                      for t in re.findall(r"\(([^()]+)\)", vm.group(1))])
+        bm = re.search(r"blocks\s*\(\s*(.*?)\n\)\s*;", txt, re.S)
+        body = bm.group(1)
+        hexes = list(re.finditer(
+            r"hex\s*\(([^()]+)\)\s*(?:\w+\s*)?\(([^()]+)\)\s*(simpleGrading|edgeGrading)\s*\(([^()]+)\)",
+            body))
+        if not hexes:
+            return {"ok": False, "error": "no hex blocks found"}
+        live = set()
+        blocks = []
+        for h in hexes:
+            ids = [int(t) for t in h.group(1).split()[:8]]
+            blocks.append(ids)
+            live.add(dec(min(ids)))
+        # curved (polyLine) edge lengths
+        plen = {}
+        em, _pairs, spans = _edge_section(txt)
+        if em is not None:
+            eb = em.group(1)
+            for key, s0, e0 in spans:
+                seg = eb[s0:e0]
+                hd = re.match(r"polyLine\s+(\d+)\s+(\d+)", seg)
+                pts = [[float(x) for x in t.split()] for t in re.findall(r"\(([^()]+)\)", seg)]
+                if hd and pts:
+                    path = [V[int(hd.group(1))]] + [np.array(p) for p in pts] + [V[int(hd.group(2))]]
+                    plen[key] = float(sum(np.linalg.norm(path[i + 1] - path[i]) for i in range(len(path) - 1)))
+        # all grid edges: length, cell count, and what kind of edge (dead / wall / free)
+        def edge_info(a, i, j, k):
+            ijk = [i, j, k]
+            lo = vid(i, j, k)
+            ijk[a] += 1
+            hi = vid(*ijk)
+            L = plen.get((lo, hi)) or float(np.linalg.norm(V[hi] - V[lo]))
+            ln = lines["xyz"[a]][[i, j, k][a] + 1]
+            n, g0 = int(ln[1]), float(ln[2])
+            nlive = ndead = 0
+            o = [x for x in range(3) if x != a]
+            for d1 in (-1, 0):
+                for d2 in (-1, 0):
+                    b = [i, j, k]
+                    b[o[0]] += d1
+                    b[o[1]] += d2
+                    if not all(0 <= b[t] < N[t] for t in range(3)):
+                        continue                                  # outside the grid
+                    if tuple(b) in live:
+                        nlive += 1
+                    else:
+                        ndead += 1
+            kind = "dead" if nlive == 0 else ("wall" if ndead else "free")
+            return {"n": max(n, 1), "L": max(L, 1e-12), "kind": kind, "g0": g0}
+        ratio = {}
+        stats = {"anchor": 0, "ends": 0, "wall": 0}
+        for a in range(3):
+            o = [x for x in range(3) if x != a]
+            for p in range(N[o[0]] + 1):
+                for q in range(N[o[1]] + 1):
+                    es = []
+                    for s in range(N[a]):
+                        ijk = [0, 0, 0]
+                        ijk[a], ijk[o[0]], ijk[o[1]] = s, p, q
+                        es.append(edge_info(a, *ijk))
+                    rs, how = _line_ratios(es, R)
+                    for s in range(N[a]):
+                        if es[s]["kind"] != "dead":
+                            ijk = [0, 0, 0]
+                            ijk[a], ijk[o[0]], ijk[o[1]] = s, p, q
+                            ratio[(a,) + tuple(ijk)] = rs[s]
+                            stats[how[s]] += 1
+        # rewrite the grading of each live block
+        out, pos, nonuni, lo_r, hi_r = [], 0, 0, 1.0, 1.0
+        for h, ids in zip(hexes, blocks):
+            vals = []
+            for p, q in _HEX_EDGES:
+                ip, iq = dec(ids[p]), dec(ids[q])
+                diff = [iq[t] - ip[t] for t in range(3)]
+                a = next((t for t in range(3) if diff[t] != 0), None)
+                if a is None or sum(abs(x) for x in diff) != 1:
+                    vals.append(1.0)
+                    continue
+                low = ip if diff[a] > 0 else iq
+                r = ratio.get((a,) + low, 1.0)
+                vals.append(r if diff[a] > 0 else 1.0 / r)
+            s0, e0 = h.start(3), h.end(4)
+            out.append(body[pos:s0])
+            out.append("edgeGrading (" + " ".join("%.8g" % v for v in vals) + ")")
+            pos = e0
+        out.append(body[pos:])
+        newbody = "".join(out)
+        txt = txt[:bm.start(1)] + newbody + txt[bm.end(1):]
+        with open(dp, "w") as f:
+            f.write(txt)
+        rv = list(ratio.values())
+        nonuni = sum(1 for r in rv if abs(r - 1.0) > 1e-6)
+        return {"ok": True, "blocks": len(blocks), "edges": len(rv), "graded": nonuni,
+                "anchored": stats["anchor"], "from_ends": stats["ends"], "wall": stats["wall"],
+                "min": min(rv) if rv else 1.0, "max": max(rv) if rv else 1.0}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
+
+
+def _grading_mode(cur):
+    m = cur.get("grading_mode")
+    if m in ("off", "block", "edge"):
+        return m
+    return "block" if cur.get("auto_grade") else "off"
+
+
+def _regrade_if_edge():
+    """Called after vertices/edges changed: keep the edge ratios in step with them."""
+    try:
+        cur = json.load(open(os.path.join(SYS, "splits.json")))
+        if _grading_mode(cur) == "edge":
+            _apply_edge_grading()
+    except (OSError, ValueError):
+        pass
+
+
 _stl_cache = {}
 _sdf_surface_cache = {}
 _lock = threading.Lock()
@@ -1468,7 +1710,7 @@ _opt = {"running": False, "cancel": False, "done": False, "log": [], "iter": 0,
         "message": "", "result": None, "error": None, "cancelled": False}
 _OPT_BLOCKED = ("/api/pinpatch", "/api/unpin", "/api/export", "/api/blockMesh",
                 "/api/checkmesh", "/api/modify", "/api/saveover", "/api/savepins",
-                "/api/interface", "/api/interface_edges", "/api/grade_outer",
+                "/api/interface", "/api/interface_edges", "/api/grade_outer", "/api/setvertices",
                 "/api/sdf/build")
 
 
@@ -1536,8 +1778,9 @@ def _restore(snap):
             f.write(snap[1])
 
 
-def _write_vertices(moves):
-    """Write {vid:[x,y,z]} into blockMeshDict and splits.json pins."""
+def _write_vertices(moves, unpin=()):
+    """Write {vid:[x,y,z]} into blockMeshDict and splits.json pins (vertices in
+    `unpin` get the position but no pin)."""
     gd = _dict_grid()
     dp = os.path.join(SYS, "blockMeshDict")
     txt = open(dp).read()
@@ -1564,7 +1807,8 @@ def _write_vertices(moves):
             have[v] = k
     for vid, p in moves.items():
         pins.pop(have.get(vid, ""), None)
-        pins[_vid_key(vid, gd)] = [float(c) for c in p]
+        if vid not in unpin:
+            pins[_vid_key(vid, gd)] = [float(c) for c in p]
     cur["pins"] = pins
     with open(sp, "w") as f:
         json.dump(cur, f)
@@ -1865,6 +2109,7 @@ def _refresh_interface_edges(changed=None, missing_only=False):
         txt = txt[:m.start(1)] + body + txt[m.end(1):]
         with open(dp, "w") as f:
             f.write(txt)
+        _regrade_if_edge()
         return {"ok": True, "edges": len(wall), "written": len(todo), "added": n_missing,
                 "straight": 0}
     except Exception as e:
@@ -2351,8 +2596,9 @@ class H(BaseHTTPRequestHandler):
                         _solid = _sd.get("solid", [])
                         _fluid = _sd.get("fluid", [])
                         _auto = bool(_sd.get("auto_grade", False))
+                        _gmode = _grading_mode(_sd)
                     except (OSError, ValueError):
-                        _pins, _solid, _fluid, _auto = {}, [], [], False
+                        _pins, _solid, _fluid, _auto, _gmode = {}, [], [], False, "off"
                     return self._json({"x": [float(v) for v in found["x"]],
                                        "y": [float(v) for v in found["y"]],
                                        "z": [float(v) for v in found["z"]],
@@ -2360,6 +2606,7 @@ class H(BaseHTTPRequestHandler):
                                        "solid": _solid if isinstance(_solid, list) else [],
                                        "fluid": _fluid if isinstance(_fluid, list) else [],
                                        "auto_grade": _auto,
+                                       "grading_mode": _gmode,
                                        "source": "blockMeshDict"})
                 with open(os.path.join(SYS, "splits.json")) as f:
                     d = json.load(f)
@@ -2484,8 +2731,15 @@ class H(BaseHTTPRequestHandler):
                     pass
             if "auto_grade" in _old:
                 payload["auto_grade"] = _old["auto_grade"]
-            if "auto_grade" in data:
-                payload["auto_grade"] = bool(data["auto_grade"])
+            if "grading_mode" in _old:
+                payload["grading_mode"] = _old["grading_mode"]
+            if data.get("grading_mode") in ("off", "block", "edge"):
+                payload["grading_mode"] = data["grading_mode"]
+            elif "auto_grade" in data:
+                payload["grading_mode"] = "block" if data["auto_grade"] else "off"
+            _gmode = _grading_mode(payload)
+            payload["grading_mode"] = _gmode
+            payload["auto_grade"] = _gmode != "off"
             if "snap_all" in _old:
                 payload["snap_all"] = _old["snap_all"]
             if "snap_all" in data:
@@ -2500,7 +2754,7 @@ class H(BaseHTTPRequestHandler):
                 elif _k in _old:
                     payload[_k] = _veto_boundary_pins(_old[_k], _old)
             grading = None
-            if payload.get("auto_grade"):
+            if _gmode != "off":
                 # outer blocks stay graded to match the inner (dead) blocks
                 try:
                     _gl, _gp, grading = _grade_outer_lines(
@@ -2520,6 +2774,9 @@ class H(BaseHTTPRequestHandler):
                 out["grading"] = grading
             # whatever the generator left straight on the interface is curved now
             out["interface_edges"] = _refresh_interface_edges(None, missing_only=True)
+            if _gmode == "edge":
+                out["edge_grading"] = _apply_edge_grading()
+            out["grading_mode"] = _gmode
             if data.get("runMesh"):
                 _, mlog = run(["bash", "-lc",
                                "source /opt/openfoam12/etc/bashrc; "
@@ -2738,6 +2995,13 @@ class H(BaseHTTPRequestHandler):
                 _gx, _gy, _gz = (sorted(float(v) for v in cur[k]) for k in ("x", "y", "z"))
             except (OSError, ValueError, KeyError, TypeError) as e:
                 return self._json({"ok": False, "error": f"no splits.json: {e}"}, 400)
+            _mode = data.get("mode")
+            if _mode is None:                                  # older clients
+                _mode = "off" if data.get("reset") else ("block" if data.get("auto") else None)
+            if _mode == "off":
+                data["reset"] = True
+            elif _mode in ("block", "edge"):
+                data["auto"] = True
             if data.get("reset"):
                 # grading switched OFF: the outer slabs go back to the generator's
                 # default grading; every cell count stays as it is.
@@ -2757,6 +3021,7 @@ class H(BaseHTTPRequestHandler):
                         ln[2] = auto_g
                         _reset += 1
                 cur["auto_grade"] = False
+                cur["grading_mode"] = "off"
                 for _ax in "xyz":
                     cur[_ax + "_lines"] = _lines[_ax]
                 try:
@@ -2774,6 +3039,7 @@ class H(BaseHTTPRequestHandler):
                 _ie = _refresh_interface_edges(None, missing_only=True)
                 _chk, _bad = _verify_grading(_lines)
                 return self._json({"ok": True, "applied": True, "reset": _reset, "auto": False,
+                                   "mode": "off",
                                    "verify": {"blocks": _chk, "differ": _bad},
                                    "interface_edges": _ie})
             try:
@@ -2782,9 +3048,17 @@ class H(BaseHTTPRequestHandler):
                     _gx, _gy, _gz, _clean_triples(cur.get("solid", [])),
                     _clean_triples(cur.get("fluid", [])), bool(cur.get("flat", False)), _mr)
             except Exception as e:
-                return self._json({"ok": False, "error": str(e)}, 400)
+                if _mode != "edge":
+                    return self._json({"ok": False, "error": str(e)}, 400)
+                # edge grading does not need dead blocks: start from the default lines
+                _co = {"x": _gx, "y": _gy, "z": _gz}
+                _gl = {ax: [[float(c), int(n), float(g)] for c, n, g in _resolve_lines(_co[ax], ax)]
+                       for ax in "xyz"}
+                _plan, _sum = [], {"slabs": 0, "changed": 0, "max_growth": 1.0, "dead_blocks": 0}
             if "auto" in data:
                 cur["auto_grade"] = bool(data["auto"])
+            if _mode in ("block", "edge"):
+                cur["grading_mode"] = _mode
             if not data.get("apply", True):
                 if "auto" in data:
                     with open(_p, "w") as f:
@@ -2806,11 +3080,35 @@ class H(BaseHTTPRequestHandler):
             if code != 0:
                 return self._json({"ok": False, "error": "generator failed", "log": tail})
             _ie = _refresh_interface_edges(None, missing_only=True)
+            _eg = _apply_edge_grading() if _mode == "edge" else None
             _chk, _bad = _verify_grading(_gl)
             return self._json({"ok": True, "applied": True, "plan": _plan, "summary": _sum,
                                "auto": bool(cur.get("auto_grade", False)),
+                               "mode": _mode or _grading_mode(cur), "edge": _eg,
                                "verify": {"blocks": _chk, "differ": _bad},
                                "interface_edges": _ie, "log": tail})
+        if u.path == "/api/setvertices":
+            # Undo/Redo of vertex moves: {states: [{vid, pos:[x,y,z], pinned: bool}]}
+            try:
+                moves, unp = {}, set()
+                for st in data["states"]:
+                    vid = int(st["vid"])
+                    pos = [float(c) for c in st["pos"]]
+                    if len(pos) != 3 or not all(c == c and abs(c) < 1e12 for c in pos):
+                        raise ValueError("bad position")
+                    moves[vid] = pos
+                    if not st.get("pinned"):
+                        unp.add(vid)
+            except (KeyError, TypeError, ValueError) as e:
+                return self._json({"ok": False, "error": f"bad request: {e}"}, 400)
+            if not moves:
+                return self._json({"ok": True, "n": 0})
+            try:
+                _backup_dict()
+                _write_vertices(moves, unp)
+            except Exception as e:
+                return self._json({"ok": False, "error": repr(e)}, 500)
+            return self._json({"ok": True, "n": len(moves)})
         if u.path == "/api/interface_edges":
             # {missing_only: bool=true}: make every interface edge a projected polyLine
             _backup_dict()
@@ -2871,7 +3169,7 @@ class H(BaseHTTPRequestHandler):
             if _nc[2]:
                 _lz[_k + 1][1] = _nc[2]
             cur["x_lines"], cur["y_lines"], cur["z_lines"] = _lx, _ly, _lz
-            if cur.get("auto_grade"):
+            if _grading_mode(cur) != "off":
                 try:
                     _gl, _gp, _gs = _grade_outer_lines(
                         _bx, _by, _bz, _clean_triples(cur.get("solid", [])),
@@ -2885,6 +3183,9 @@ class H(BaseHTTPRequestHandler):
             tail = "\n".join(log.strip().splitlines()[-14:])
             if code != 0:
                 return self._json({"ok": False, "log": tail})
+            if _grading_mode(cur) == "edge":
+                _refresh_interface_edges(None, missing_only=True)
+                _apply_edge_grading()
             return self._json({"ok": True, "log": tail,
                                "nc": [_lx[_i + 1][1], _ly[_j + 1][1], _lz[_k + 1][1]]})
         if u.path == "/api/interface":

@@ -124,6 +124,7 @@
 </header>
 <div id="main">
 <aside>
+  <div class="btnrow"><button class="btn ghost" id="vundo" disabled title="nothing to undo">Undo</button><button class="btn ghost" id="vredo" disabled title="nothing to redo">Redo</button></div>
   <div class="btnrow"><button class="btn" id="readbtn">Read blockMeshDict</button></div>
   <h2 id="domhead" style="cursor:pointer;user-select:none">DOMAIN &#9656;</h2>
   <div id="domwrap" style="display:none">
@@ -151,7 +152,12 @@
   <div id="blockwrap" style="display:none">
   <div class="btnrow"><button class="btn" id="modbtn">Modify block</button></div>
   <div class="row"><span class="lab" style="width:auto">nx</span><input type="number" id="bnx" step="1" min="1" max="200"><span class="lab" style="width:auto">ny</span><input type="number" id="bny" step="1" min="1" max="200"><span class="lab" style="width:auto">nz</span><input type="number" id="bnz" step="1" min="1" max="200"></div>
-  <label class="chk" title="Grades the live blocks outside the dead (solid) blocks so the cell next to the inner blocks is the same size as the inner cells, growing outward with no jump. Your cell counts are kept; only the grading changes. Stays applied every time blockMeshDict is written. Untick to return the outer blocks to the default grading."><input type="checkbox" id="blockgrading"> block grading</label>
+  <div class="mut" style="margin-top:6px">grading</div>
+  <div class="seg" id="gradeseg">
+    <button data-g="off" class="onA" title="Default grading from the generator.">off</button>
+    <button data-g="block" title="Block grading: one expansion ratio per direction in each block, chosen so the cells of the outer blocks match the inner (dead) ones, growing outward. Cell counts are kept.">block grading</button>
+    <button data-g="edge" title="Edge grading: every edge in the live region gets its own ratio from the cell sizes at its two ends. Cells next to the inner blocks keep the inner size, and away from the car the ratio follows the neighbouring cell sizes. One ratio per edge, so blocks stay conforming. Written as edgeGrading.">edge grading</button>
+  </div>
   <div id="blksel" class="mut"></div>
   <div class="mut" id="rlabi">i</div>
   <div class="dsl"><input type="range" id="ri0" step="1"><input type="range" id="ri1" step="1"></div>
@@ -623,49 +629,94 @@ document.addEventListener("keydown", (ev)=>{
   const t=document.activeElement;
   if(t&&(t.tagName==="INPUT"||t.tagName==="TEXTAREA")) return;
   if((ev.ctrlKey||ev.metaKey)&&ev.key.toLowerCase()==="z"&&!ev.shiftKey){
-    ev.preventDefault(); undoLast(); return;
+    ev.preventDefault(); histStep(-1); return;
+  }
+  if((ev.ctrlKey||ev.metaKey)&&(ev.key.toLowerCase()==="y"||(ev.key.toLowerCase()==="z"&&ev.shiftKey))){
+    ev.preventDefault(); histStep(1); return;
   }
   if((ev.key==="Delete"||ev.key==="Backspace")&&S.selected){
     ev.preventDefault();
     const {axis,value}=S.selected, L=S.splits[axis];
     const i=L.findIndex(v=>Math.abs(v-value)<1e-9);
-    if(i>0&&i<L.length-1){ pushHist(); L.splice(i,1); log(`deleted ${axis}=${value.toFixed(3)}`); }
+    if(i>0&&i<L.length-1){ pushHist("delete "+axis+" split"); L.splice(i,1); log(`deleted ${axis}=${value.toFixed(3)}`); }
     else log("cannot delete a domain bound");
     S.selected=null; renderRows(); modelChanged(); renderSel();
   }
 });
-/* ---------------- undo (Ctrl+Z) ---------------- */
-const hist=[];
+/* ---------------- Undo / Redo: one history for everything ----------------
+   grid edits (splits, live/dead blocks, Read blockMeshDict), block cell counts and vertex
+   moves share one timeline, driven by the Undo / Redo buttons at the top of the left panel
+   and by Ctrl+Z / Ctrl+Y. Vertex entries are written back to the server (dict + pins). */
+const HIST={list:[], ptr:0, busy:false, max:100};
 function snapGrid(){
   return {x:[...S.splits.x],y:[...S.splits.y],z:[...S.splits.z],
-          domain:{...S.domain}, over:{...S.over},
-          pins:JSON.parse(JSON.stringify(S.pins))};
+          domain:{...S.domain}, over:{...S.over}};      // pins belong to the vertex history
 }
-function pushHist(){ hist.push({t:"grid",s:snapGrid()}); if(hist.length>50) hist.shift(); }
-async function undoLast(){
-  const h=hist.pop();
-  if(!h) return;
-  if(h.t==="nc"){
-    try{
-      await api("/api/modify",{method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({block:h.block,nc:h.prev})});
-      await refreshBlocks(); renderBlockSel();
-    }catch(e){ log("undo failed: "+e.message); }
-    return;
-  }
-  S.splits={x:[...h.s.x],y:[...h.s.y],z:[...h.s.z]};
-  S.domain={...h.s.domain};
+function histPush(e){
+  HIST.list.length=HIST.ptr;                              // a new action drops the redo tail
+  HIST.list.push(e);
+  if(HIST.list.length>HIST.max) HIST.list.shift();
+  HIST.ptr=HIST.list.length;
+  histButtons();
+}
+function pushHist(label){ histPush({kind:"grid", label:label||"edit", before:snapGrid(), after:null}); }
+function histButtons(){
+  const u=$("vundo"), r=$("vredo"); if(!u||!r) return;
+  const un=HIST.list[HIST.ptr-1], re=HIST.list[HIST.ptr];
+  u.disabled=HIST.busy||!un; r.disabled=HIST.busy||!re;
+  u.title=un?`undo: ${un.label}`+(un.kind==="vertex"?` (${un.before.length} vertices)`:""):"nothing to undo";
+  r.title=re?`redo: ${re.label}`+(re.kind==="vertex"?` (${re.before.length} vertices)`:""):"nothing to redo";
+}
+async function restoreGrid(s){
+  S.splits={x:[...s.x],y:[...s.y],z:[...s.z]};
+  S.domain={...s.domain};
   for(const [k,v] of [["dxmin",S.domain.xmin],["dxmax",S.domain.xmax],["dymin",S.domain.ymin],
                       ["dymax",S.domain.ymax],["dzmin",S.domain.zmin],["dzmax",S.domain.zmax]])
     $(k).value=v;
   S.selected=null; S.selBlock=null;
   renderRows(); modelChanged(); renderSel(); renderBlockSel();
-  S.over={...h.s.over};
-  S.pins=JSON.parse(JSON.stringify(h.s.pins||{}));
+  S.over={...s.over};
   S.vertexSel=null; showX("w",null); hideAllGreen();
   S.projDirty=true;
   await refreshBlocks();
+}
+async function histStep(dir){
+  if(HIST.busy) return;
+  const e=dir<0?HIST.list[HIST.ptr-1]:HIST.list[HIST.ptr];
+  if(!e) return;
+  HIST.busy=true; histButtons();
+  const verb=dir<0?"undo":"redo";
+  try{
+    setStat((dir<0?"undoing ":"redoing ")+e.label+"…");
+    if(e.kind==="grid"){
+      if(dir<0){ e.after=snapGrid(); await restoreGrid(e.before); }
+      else await restoreGrid(e.after);
+    } else if(e.kind==="nc"){
+      const r=await api("/api/modify",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({block:e.block, nc:dir<0?e.prev:e.next})});
+      if(r.error) throw new Error(r.error);
+      if(r.ok===false) throw new Error(tailMsg(r.log,2)||"generator failed");
+      await refreshBlocks(); renderBlockSel();
+    } else {                                              // vertex moves
+      if(e.sig!==JSON.stringify(S.dictGrid||null)){
+        if(dir<0) HIST.list.splice(0,HIST.ptr), HIST.ptr=0; else HIST.list.length=HIST.ptr;
+        setStat("the grid changed since those vertex moves - they can no longer be "+verb+"ne");
+        return;
+      }
+      const states=dir<0?e.before:e.after;
+      const r=await api("/api/setvertices",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({states:states.map(s=>({vid:s.vid,pos:s.pos,pinned:s.pinned}))})});
+      if(r&&r.ok===false) throw new Error(r.error||"server refused");
+      const g=await api("/api/read_dict");
+      if(g&&g.pins&&typeof g.pins==="object") S.pins=g.pins;
+      S.projDirty=true;
+      await _resyncDict();
+    }
+    HIST.ptr+=dir;
+    setStat((dir<0?"undone: ":"redone: ")+e.label);
+  }catch(err){
+    setStat(verb+" failed: "+(err&&err.message?err.message:err)); log("history: "+err);
+  }finally{ HIST.busy=false; histButtons(); }
 }
 /* ---------------- car + planes ---------------- */
 async function loadCar(stride){
@@ -1491,7 +1542,7 @@ $("addbtn").onclick=()=>{
   const D=S.domain, lo={x:D.xmin,y:D.ymin,z:D.zmin}[ax], hi={x:D.xmax,y:D.ymax,z:D.zmax}[ax];
   if(!(lo<v&&v<hi)){ flash("outside domain"); return; }
   if(S.splits[ax].some(w=>Math.abs(w-v)<1e-9)){ flash("already present"); return; }
-  pushHist();
+  pushHist("add "+ax+" split");
   S.splits[ax].push(v); S.splits[ax].sort((a,b)=>a-b);
   renderRows(); modelChanged(); flash(`added ${ax}`);
 };
@@ -1510,7 +1561,7 @@ $("modsplitbtn").onclick=()=>{
   if(!(lo<nv&&nv<hi)){ flash("outside domain"); return; }
   if(Math.abs(nv-value)<1e-9){ flash("no change"); return; }
   if(L.some((v,idx)=>idx!==i&&Math.abs(v-nv)<0.0025)){ flash("too close to another split"); return; }
-  pushHist();
+  pushHist("move "+axis+" split");
   const preRank=L.filter(v=>v<value-1e-9).length;
   L[i]=nv; S.splits[axis]=[...L].sort((a,b)=>a-b);
   S.selected.value=nv;
@@ -1523,7 +1574,7 @@ $("readbtn").onclick=async()=>{
   const _b=busy($("readbtn"),true);
   try{
     const T=await api("/api/read_dict");
-    pushHist();
+    pushHist("read blockMeshDict");
     S.splits={x:[...T.x],y:[...T.y],z:[...T.z]};
     S.domain={xmin:T.x[0],xmax:T.x[T.x.length-1],ymin:T.y[0],ymax:T.y[T.y.length-1],zmin:T.z[0],zmax:T.z[T.z.length-1]};
     for(const [k,v] of [["dxmin",S.domain.xmin],["dxmax",S.domain.xmax],["dymin",S.domain.ymin],
@@ -1562,7 +1613,7 @@ $("expbtn").onclick=async()=>{
     const {so,fl}=overLists();
     const body={x:S.splits.x, y:S.splits.y, z:S.splits.z, solid:so, fluid:fl};
     if(S.pins) body.pins=S.pins;
-    if($("blockgrading")) body.auto_grade=$("blockgrading").checked;
+    body.grading_mode=GRADE_MODE;
     const r=await api("/api/export",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     if(r.ok===false) throw new Error(tailMsg(r.log,2)||"exporter failed");
@@ -1572,6 +1623,7 @@ $("expbtn").onclick=async()=>{
     refreshSelHL();
     const ie=r.interface_edges;
     if(r.grading && r.grading.error) log("outer grading skipped: "+r.grading.error);
+    if(r.edge_grading && r.edge_grading.ok===false) log("edge grading failed: "+r.edge_grading.error);
     if(ie&&ie.ok&&ie.added) setStat(`blockMeshDict written · ${ie.added} interface edges projected onto the surface`);
     else if(ie&&ie.ok===false) setStat("blockMeshDict written · interface edges NOT updated: "+(ie.error||"?"));
   }catch(e){ const m="export failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
@@ -1584,27 +1636,45 @@ function gradeSummary(r){
   for(const p of rows) console.info(`grading ${p.axis} slab ${p.slab} [${p.c0}..${p.c1}] n=${p.n}: g ${Number(p.old_g).toFixed(3)} -> ${Number(p.new_g).toFixed(3)}, `
     +`cell at inner side ${Number(p.match_mm).toFixed(1)} mm, outer cell ${Number(p.outer_mm).toFixed(1)} mm, growth ${Number(p.growth).toFixed(3)}/cell${p.note?" ("+p.note+")":""}`);
   const notes=rows.filter(p=>p.note).length;
-  let t=`${s.changed||0} of ${s.slabs||0} outer slabs graded, max growth ${Number(s.max_growth||1).toFixed(2)}x per cell`;
+  let t=`${s.slabs||0} outer slabs graded, max growth ${Number(s.max_growth||1).toFixed(2)}x per cell`;
   if(notes) t+=` · ${notes} note(s) in console`;
   if(r.verify && r.verify.differ) t+=` · ⚠ ${r.verify.differ} blocks in blockMeshDict don't follow it (generator ignoring grading?)`;
   return t;
 }
-async function applyBlockGrading(on){
-  const cb=$("blockgrading"); cb.disabled=true;
-  setStat(on?"grading outer blocks…":"returning outer blocks to default grading…");
+let GRADE_MODE="off";
+function setGradeSeg(mode){
+  GRADE_MODE=(mode==="block"||mode==="edge")?mode:"off";
+  for(const b of document.querySelectorAll("#gradeseg button")) b.classList.toggle("onA", b.dataset.g===GRADE_MODE);
+}
+function edgeSummary(e){
+  if(!e||e.ok===false) return "edge grading could not be written: "+((e&&e.error)||"unknown error");
+  const f=v=>Number(v).toFixed(2);
+  return `${e.graded} of ${e.edges} edges graded (ratios ${f(e.min)}–${f(e.max)}), ${e.anchored+e.wall} matched to the inner cells`;
+}
+async function applyGradingMode(mode){
+  if(mode===GRADE_MODE) return;
+  const prev=GRADE_MODE, seg=$("gradeseg");
+  seg.style.pointerEvents="none"; seg.style.opacity="0.6";
+  setStat(mode==="off"?"returning to default grading…":(mode==="edge"?"edge grading…":"block grading…"));
   try{
-    const body=on?{apply:true,auto:true}:{apply:true,auto:false,reset:true};
-    const r=await api("/api/grade_outer",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const r=await api("/api/grade_outer",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({apply:true,mode})});
     if(r.ok===false) throw new Error(r.error||"failed");
-    setStat(on?("block grading on · "+gradeSummary(r)):"block grading off · outer blocks back to default grading");
+    setGradeSeg(mode);
+    if(mode==="off") setStat("grading off · default grading");
+    else if(mode==="block") setStat("block grading · "+gradeSummary(r));
+    else{
+      if(r.edge&&r.edge.ok===false) throw new Error(edgeSummary(r.edge));
+      setStat("edge grading · "+edgeSummary(r.edge));
+    }
     await loadDictSurface(); await refreshBlocks(); refreshSelHL();
   }catch(e){
-    cb.checked=!on;                                   // it did not happen: put the box back
-    const m="block grading failed: "+(e&&e.message?e.message:e);
+    setGradeSeg(prev);                                   // it did not happen: show the old mode
+    const m="grading failed: "+(e&&e.message?e.message:e);
     setStat(m); log(m);
-  }finally{ cb.disabled=false; }
+  }finally{ seg.style.pointerEvents=""; seg.style.opacity=""; }
 }
-$("blockgrading").onchange=()=>applyBlockGrading($("blockgrading").checked);
+for(const b of document.querySelectorAll("#gradeseg button")) b.onclick=()=>applyGradingMode(b.dataset.g);
 $("runbmbtn").onclick=async()=>{
   const btn=$("runbmbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Running…";
   setStat("blockMesh running…");
@@ -1716,6 +1786,8 @@ $("modbtn").onclick=async()=>{
   if(!S.selBlock){ log("select a block first"); return; }
   const num=id=>{ const v=parseFloat($(id).value); return (isFinite(v)&&v>=1)?Math.min(200,Math.round(v)):null; };
   const btn=$("modbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Modifying…";
+  const _blk=S.selBlock, _fb=(typeof findBlock==="function")?findBlock(_blk):null;
+  const _prevNc=(_fb&&Array.isArray(_fb.nc))?[..._fb.nc]:null;
   try{
     const r=await api("/api/modify",{method:"POST",
       headers:{"Content-Type":"application/json"},
@@ -1728,6 +1800,8 @@ $("modbtn").onclick=async()=>{
       if($("bnz")) $("bnz").value=r.nc[2];
     }
     setStat("block cell counts updated"); log(r.log||"block cell counts updated");
+    if(_prevNc && Array.isArray(r.nc) && r.nc.some((v,i)=>v!==_prevNc[i]))
+      histPush({kind:"nc", label:"block cell counts", block:_blk, prev:_prevNc, next:[...r.nc]});
     await refreshBlocks(); renderBlockSel();
   }catch(e){ const m="modify failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
   finally{ busy(_b,false); btn.textContent=old; }
@@ -1745,7 +1819,7 @@ function _flipSelectedBlock(state){
     const m=`block ${key} is already ${label}`;
     setStat(m); log(m); return;
   }
-  pushHist();
+  pushHist("mark block "+label);
   S.over[key] = state ? 1 : 0;
   // Optimistic local update: flip S.blk immediately so the box recolours this
   // frame, then confirm against the server. Without this the colour only
@@ -2247,6 +2321,7 @@ async function updateProjection(){
   const old=btn.textContent; btn.disabled=true; btn.classList.add("busy"); btn.textContent="Projecting…";
   setStat("reading blockMeshDict surface vertices…");
   try{
+    const _vtok=vhBegin();
     const wall=await api("/api/dictwall");
     if(wall.drift) throw new Error(wall.drift_msg||"blockMeshDict grid differs from the loaded splits; export the current grid first");
     const verts=wall.verts||[], faces=wall.fidx||[];
@@ -2273,6 +2348,7 @@ async function updateProjection(){
     S.dictGrid={x:updated.x,y:updated.y,z:updated.z};
     S.faceProj={faceIndices:updated.fidx||[],curves:updated.curves||[],curveIds:updated.curveIds||[],bands:[]};
     S.projDirty=false;
+    vhEnd(_vtok,"update projection");
     deactivateVertexTools();          // tools stay off until the user picks one again
     refreshSelHL();
     refreshProjectedMesh();
@@ -2286,6 +2362,30 @@ async function updateProjection(){
   }finally{btn.disabled=false;btn.classList.remove("busy");btn.textContent=old;}
 }
 $("updproj").onclick=()=>updateProjection();
+/* ---- vertex-move recorder: each slide / snap / Undo projection / Update projection is
+   stored as the before/after state (position + pinned) of the vertices it changed. ---- */
+function _surfaceIdList(){
+  const set=new Set(), f=(S.faceProj&&S.faceProj.faceIndices)||[];
+  for(const q of f) if(Array.isArray(q)) for(const i of q) if(Number.isInteger(i)) set.add(i);
+  return [...set];
+}
+function _vstate(vid){
+  const p=S.dictVerts&&S.dictVerts[vid], k=pinKey(vid);
+  return {vid, pos:p?[p[0],p[1],p[2]]:null, pinned:!!(k&&S.pins&&S.pins[k])};
+}
+function vhBegin(){ const ids=_surfaceIdList(); return {ids, before:ids.map(_vstate), sig:JSON.stringify(S.dictGrid||null)}; }
+function vhEnd(tok,label){
+  if(!tok) return;
+  const b=[], a=[];
+  for(let n=0;n<tok.ids.length;n++){
+    const x=tok.before[n], y=_vstate(tok.ids[n]);
+    if(!x.pos||!y.pos) continue;
+    const d=Math.hypot(x.pos[0]-y.pos[0],x.pos[1]-y.pos[1],x.pos[2]-y.pos[2]);
+    if(d>1e-9||x.pinned!==y.pinned){ b.push(x); a.push(y); }
+  }
+  if(!b.length) return;
+  histPush({kind:"vertex", label:label||"vertex move", before:b, after:a, sig:tok.sig});
+}
 /* Re-read the wall from blockMeshDict so curved edges / quads follow the
    vertex that just moved, then redraw the edge overlay. */
 async function _resyncDict(){
@@ -2306,7 +2406,7 @@ async function _applyVertexPin(pos, msg){
   const vid=S.vertexSel, k=pinKey(vid);
   if(!k){ setStat("vertex has no grid key"); return false; }
   if(!pos||pos.length!==3||!pos.every(Number.isFinite)){ setStat("invalid target position"); return false; }
-  pushHist();
+  const _vtok=vhBegin();
   const prevPin=S.pins[k]?[...S.pins[k]]:null;
   const prevPos=S.dictVerts[vid]?[...S.dictVerts[vid]]:null;
   S.pins[k]=[pos[0],pos[1],pos[2]];
@@ -2335,6 +2435,7 @@ async function _applyVertexPin(pos, msg){
   }
   S.projDirty=true;
   await _resyncDict();
+  vhEnd(_vtok, msg?msg.split(":")[0]:"vertex move");
   if(msg) setStat(msg);
   return true;
 }
@@ -2367,13 +2468,13 @@ $("undopbtn").onclick=async()=>{
   if(S.vertexSel===null||S.vertexSel===undefined){ setStat("select a vertex first"); return; }
   const btn=$("undopbtn"), _b=busy(btn,true), vid=S.vertexSel;
   try{
-    const k=pinKey(vid);
-    pushHist();
+    const k=pinKey(vid), _vtok=vhBegin();
     if(k) delete S.pins[k];
     const r=await api("/api/unpin",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({key:k,vid:vid})});
     if(r&&Array.isArray(r.point)&&r.point.length===3&&S.dictVerts[vid]) S.dictVerts[vid]=r.point;
     await _resyncDict();
+    vhEnd(_vtok,"undo projection");
     showX("g",null,"slide");
     S.projDirty=true;
     setStat("projection undone — vertex back at block corner");
@@ -2486,6 +2587,8 @@ function deactivateVertexTools(){
   hideAllGreen();
   try{ refreshSelHL(); }catch(e){}
 }
+$("vundo").onclick=()=>histStep(-1);
+$("vredo").onclick=()=>histStep(1);
 $("selcbtn").onclick=()=>setVertexTool("select");
 $("sldcbtn").onclick=()=>setVertexTool("slide");
 (async function startPage(){
@@ -2502,7 +2605,7 @@ $("sldcbtn").onclick=()=>setVertexTool("slide");
       for(const t of (savedGrid.solid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=1;
       for(const t of (savedGrid.fluid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=0;
       if(savedGrid.pins && typeof savedGrid.pins==="object") S.pins = savedGrid.pins;
-      if($("blockgrading")) $("blockgrading").checked=!!savedGrid.auto_grade;
+      setGradeSeg(savedGrid.grading_mode||(savedGrid.auto_grade?"block":"off"));
     } else {
       S.splits = tables.tuned || S.splits;
     }
