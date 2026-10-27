@@ -124,7 +124,7 @@
 </header>
 <div id="main">
 <aside>
-  <div class="btnrow"><button class="btn ghost" id="vundo" disabled title="nothing to undo">Undo</button><button class="btn ghost" id="vredo" disabled title="nothing to redo">Redo</button></div>
+  <div class="btnrow"><button class="btn ghost" id="vundo" disabled title="nothing to undo">Undo (Ctrl+Z)</button><button class="btn ghost" id="vredo" disabled title="nothing to redo">Redo (Ctrl+Y)</button></div>
   <div class="btnrow"><button class="btn" id="readbtn">Read blockMeshDict</button></div>
   <h2 id="domhead" style="cursor:pointer;user-select:none">DOMAIN &#9656;</h2>
   <div id="domwrap" style="display:none">
@@ -152,12 +152,6 @@
   <div id="blockwrap" style="display:none">
   <div class="btnrow"><button class="btn" id="modbtn">Modify block</button></div>
   <div class="row"><span class="lab" style="width:auto">nx</span><input type="number" id="bnx" step="1" min="1" max="200"><span class="lab" style="width:auto">ny</span><input type="number" id="bny" step="1" min="1" max="200"><span class="lab" style="width:auto">nz</span><input type="number" id="bnz" step="1" min="1" max="200"></div>
-  <div class="mut" style="margin-top:6px">grading</div>
-  <div class="seg" id="gradeseg">
-    <button data-g="off" class="onA" title="Default grading from the generator.">off</button>
-    <button data-g="block" title="Block grading: one expansion ratio per direction in each block, chosen so the cells of the outer blocks match the inner (dead) ones, growing outward. Cell counts are kept.">block grading</button>
-    <button data-g="edge" title="Edge grading: every edge in the live region gets its own ratio from the cell sizes at its two ends. Cells next to the inner blocks keep the inner size, and away from the car the ratio follows the neighbouring cell sizes. One ratio per edge, so blocks stay conforming. Written as edgeGrading.">edge grading</button>
-  </div>
   <div id="blksel" class="mut"></div>
   <div class="mut" id="rlabi">i</div>
   <div class="dsl"><input type="range" id="ri0" step="1"><input type="range" id="ri1" step="1"></div>
@@ -696,7 +690,7 @@ async function histStep(dir){
         body:JSON.stringify({block:e.block, nc:dir<0?e.prev:e.next})});
       if(r.error) throw new Error(r.error);
       if(r.ok===false) throw new Error(tailMsg(r.log,2)||"generator failed");
-      await refreshBlocks(); renderBlockSel();
+      await loadDictSurface(); await refreshBlocks(); renderBlockSel(); refreshSelHL();
     } else {                                              // vertex moves
       if(e.sig!==JSON.stringify(S.dictGrid||null)){
         if(dir<0) HIST.list.splice(0,HIST.ptr), HIST.ptr=0; else HIST.list.length=HIST.ptr;
@@ -1613,7 +1607,6 @@ $("expbtn").onclick=async()=>{
     const {so,fl}=overLists();
     const body={x:S.splits.x, y:S.splits.y, z:S.splits.z, solid:so, fluid:fl};
     if(S.pins) body.pins=S.pins;
-    body.grading_mode=GRADE_MODE;
     const r=await api("/api/export",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     if(r.ok===false) throw new Error(tailMsg(r.log,2)||"exporter failed");
@@ -1622,59 +1615,13 @@ $("expbtn").onclick=async()=>{
     await refreshBlocks();
     refreshSelHL();
     const ie=r.interface_edges;
-    if(r.grading && r.grading.error) log("outer grading skipped: "+r.grading.error);
-    if(r.edge_grading && r.edge_grading.ok===false) log("edge grading failed: "+r.edge_grading.error);
-    if(ie&&ie.ok&&ie.added) setStat(`blockMeshDict written · ${ie.added} interface edges projected onto the surface`);
-    else if(ie&&ie.ok===false) setStat("blockMeshDict written · interface edges NOT updated: "+(ie.error||"?"));
+    const gn=gradeNote(r.grading); if(gn) log(gn);
+    if(ie&&ie.ok===false) setStat("blockMeshDict written · interface edges NOT updated: "+(ie.error||"?"));
+    else setStat("blockMeshDict written"+(ie&&ie.ok&&ie.added?` · ${ie.added} interface edges projected`:"")+(gn?" · "+gn:""));
   }catch(e){ const m="export failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
   finally{ busy(_b,false); btn.textContent=old; }
 };
 
-/* ---- grade the outer (live) blocks so their cells match the inner (dead) ones ---- */
-function gradeSummary(r){
-  const s=r.summary||{}, rows=r.plan||[];
-  for(const p of rows) console.info(`grading ${p.axis} slab ${p.slab} [${p.c0}..${p.c1}] n=${p.n}: g ${Number(p.old_g).toFixed(3)} -> ${Number(p.new_g).toFixed(3)}, `
-    +`cell at inner side ${Number(p.match_mm).toFixed(1)} mm, outer cell ${Number(p.outer_mm).toFixed(1)} mm, growth ${Number(p.growth).toFixed(3)}/cell${p.note?" ("+p.note+")":""}`);
-  const notes=rows.filter(p=>p.note).length;
-  let t=`${s.slabs||0} outer slabs graded, max growth ${Number(s.max_growth||1).toFixed(2)}x per cell`;
-  if(notes) t+=` · ${notes} note(s) in console`;
-  if(r.verify && r.verify.differ) t+=` · ⚠ ${r.verify.differ} blocks in blockMeshDict don't follow it (generator ignoring grading?)`;
-  return t;
-}
-let GRADE_MODE="off";
-function setGradeSeg(mode){
-  GRADE_MODE=(mode==="block"||mode==="edge")?mode:"off";
-  for(const b of document.querySelectorAll("#gradeseg button")) b.classList.toggle("onA", b.dataset.g===GRADE_MODE);
-}
-function edgeSummary(e){
-  if(!e||e.ok===false) return "edge grading could not be written: "+((e&&e.error)||"unknown error");
-  const f=v=>Number(v).toFixed(2);
-  return `${e.graded} of ${e.edges} edges graded (ratios ${f(e.min)}–${f(e.max)}), ${e.anchored+e.wall} matched to the inner cells`;
-}
-async function applyGradingMode(mode){
-  if(mode===GRADE_MODE) return;
-  const prev=GRADE_MODE, seg=$("gradeseg");
-  seg.style.pointerEvents="none"; seg.style.opacity="0.6";
-  setStat(mode==="off"?"returning to default grading…":(mode==="edge"?"edge grading…":"block grading…"));
-  try{
-    const r=await api("/api/grade_outer",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({apply:true,mode})});
-    if(r.ok===false) throw new Error(r.error||"failed");
-    setGradeSeg(mode);
-    if(mode==="off") setStat("grading off · default grading");
-    else if(mode==="block") setStat("block grading · "+gradeSummary(r));
-    else{
-      if(r.edge&&r.edge.ok===false) throw new Error(edgeSummary(r.edge));
-      setStat("edge grading · "+edgeSummary(r.edge));
-    }
-    await loadDictSurface(); await refreshBlocks(); refreshSelHL();
-  }catch(e){
-    setGradeSeg(prev);                                   // it did not happen: show the old mode
-    const m="grading failed: "+(e&&e.message?e.message:e);
-    setStat(m); log(m);
-  }finally{ seg.style.pointerEvents=""; seg.style.opacity=""; }
-}
-for(const b of document.querySelectorAll("#gradeseg button")) b.onclick=()=>applyGradingMode(b.dataset.g);
 $("runbmbtn").onclick=async()=>{
   const btn=$("runbmbtn"), old=btn.textContent, _b=busy(btn,true); btn.textContent="Running…";
   setStat("blockMesh running…");
@@ -1799,10 +1746,10 @@ $("modbtn").onclick=async()=>{
       if($("bny")) $("bny").value=r.nc[1];
       if($("bnz")) $("bnz").value=r.nc[2];
     }
-    setStat("block cell counts updated"); log(r.log||"block cell counts updated");
+    { const gn=gradeNote(r.grading); setStat("block cell counts updated"+(gn?" · "+gn:"")); log(r.log||"block cell counts updated"); }
     if(_prevNc && Array.isArray(r.nc) && r.nc.some((v,i)=>v!==_prevNc[i]))
       histPush({kind:"nc", label:"block cell counts", block:_blk, prev:_prevNc, next:[...r.nc]});
-    await refreshBlocks(); renderBlockSel();
+    await loadDictSurface(); await refreshBlocks(); renderBlockSel(); refreshSelHL();
   }catch(e){ const m="modify failed: "+(e&&e.message?e.message:e); setStat(m); log(m); console.error(e); }
   finally{ busy(_b,false); btn.textContent=old; }
 };
@@ -2386,6 +2333,12 @@ function vhEnd(tok,label){
   if(!b.length) return;
   histPush({kind:"vertex", label:label||"vertex move", before:b, after:a, sig:tok.sig});
 }
+/* What the automatic block grading did (the server reports it with Write / Modify). */
+function gradeNote(g){
+  if(!g) return "";
+  if(g.error) return "outer blocks left ungraded ("+g.error+")";
+  return `outer blocks graded (${g.slabs||0} slabs, max growth ${Number(g.max_growth||1).toFixed(2)}x per cell)`;
+}
 /* Re-read the wall from blockMeshDict so curved edges / quads follow the
    vertex that just moved, then redraw the edge overlay. */
 async function _resyncDict(){
@@ -2605,7 +2558,6 @@ $("sldcbtn").onclick=()=>setVertexTool("slide");
       for(const t of (savedGrid.solid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=1;
       for(const t of (savedGrid.fluid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=0;
       if(savedGrid.pins && typeof savedGrid.pins==="object") S.pins = savedGrid.pins;
-      setGradeSeg(savedGrid.grading_mode||(savedGrid.auto_grade?"block":"off"));
     } else {
       S.splits = tables.tuned || S.splits;
     }
