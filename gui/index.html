@@ -125,7 +125,14 @@
 <div id="main">
 <aside>
   <div class="btnrow"><button class="btn ghost" id="vundo" disabled title="nothing to undo">Undo (Ctrl+Z)</button><button class="btn ghost" id="vredo" disabled title="nothing to redo">Redo (Ctrl+Y)</button></div>
-  <div class="btnrow"><button class="btn" id="readbtn">Read blockMeshDict</button></div>
+  <h2 id="geohead" style="cursor:pointer;user-select:none">GEOMETRY &#9656;</h2>
+  <div id="geowrap" style="display:none">
+  <div class="row" style="border-bottom:0;padding-top:2px">
+    <input type="text" id="geostl" spellcheck="false" placeholder="constant/geometry/car_simplified.stl" title="car STL to mesh against (relative to the case, or an absolute path)">
+  </div>
+  <div class="btnrow"><button class="btn" id="geoapply">Apply geometry</button></div>
+  <div class="mut" id="geostat"></div>
+  </div>
   <h2 id="domhead" style="cursor:pointer;user-select:none">DOMAIN &#9656;</h2>
   <div id="domwrap" style="display:none">
   <div class="row"><span class="lab">X</span><input type="number" id="dxmin" step="0.5" value="-8"><input type="number" id="dxmax" step="0.5" value="12"></div>
@@ -193,7 +200,7 @@
 </aside>
 <div id="view"><canvas id="c" width="900" height="600"></canvas>
   <div id="glstat">starting…</div>
-  <div id="pickinfo"></div>
+  <div id="pickinfo"><span class="mut">xyz</span></div>
   <div id="hint">drag&nbsp;=&nbsp;orbit · wheel&nbsp;=&nbsp;zoom · right-drag&nbsp;=&nbsp;pan · click border&nbsp;=&nbsp;select · drag any plane&nbsp;=&nbsp;move · Del key&nbsp;=&nbsp;delete selected</div>
   <div id="winrect"></div>
 </div>
@@ -209,6 +216,7 @@ const S = {
   over: {},                    // "i,j,k" -> 1 inside / 0 outside (manual)
   blk: [],                     // [{k:[i,j,k], c:[x,y,z], s:0/1 effective}]
   domain: {xmin:-8, xmax:12, ymin:-0.59, ymax:4, zmin:-4, zmax:4},
+  geometry: null,              // {stl, exists, tris, sdf_stale} from /api/tables
   tables: null,
   selected: null,
   clickPt: null,
@@ -1564,26 +1572,6 @@ $("modsplitbtn").onclick=()=>{
   log(`moved ${axis} ${value.toFixed(3)} → ${nv.toFixed(3)}`);
   renderRows(); modelChanged(); renderSel(); flash(`moved ${axis}`);
 };
-$("readbtn").onclick=async()=>{
-  const _b=busy($("readbtn"),true);
-  try{
-    const T=await api("/api/read_dict");
-    pushHist("read blockMeshDict");
-    S.splits={x:[...T.x],y:[...T.y],z:[...T.z]};
-    S.domain={xmin:T.x[0],xmax:T.x[T.x.length-1],ymin:T.y[0],ymax:T.y[T.y.length-1],zmin:T.z[0],zmax:T.z[T.z.length-1]};
-    for(const [k,v] of [["dxmin",S.domain.xmin],["dxmax",S.domain.xmax],["dymin",S.domain.ymin],
-                        ["dymax",S.domain.ymax],["dzmin",S.domain.zmin],["dzmax",S.domain.zmax]])
-      $(k).value=v;
-    S.selected=null;
-    S.over={};
-    for(const t of (T.solid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=1;
-    for(const t of (T.fluid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=0;
-    renderRows(); modelChanged(); renderSel();
-    S.pins=(T.pins&&typeof T.pins==="object")?T.pins:{};
-    hideAllGreen();
-    log("splits restored from "+(T.source||"blockMeshDict"));
-  }finally{ busy(_b,false); }
-};
 /* ---------------- blockMeshDict / blockMesh / checkMesh ---------------- */
 function clearBadGroups(){ clearGroup(badGroup); clearGroup(nonGroup); clearGroup(skewGroup); clearGroup(pyrGroup); clearGroup(aspGroup); }
 function showBadCells(list, color, group){
@@ -1812,6 +1800,46 @@ $("splithead").onclick=()=>{
   w.style.display=open?"none":"";
   $("splithead").innerHTML=open?"SPLITS &#9656;":"SPLITS &#9662;";
 };
+$("geohead").onclick=()=>{
+  const w=$("geowrap"), open=w.style.display!=="none";
+  w.style.display=open?"none":"";
+  $("geohead").innerHTML=open?"GEOMETRY &#9656;":"GEOMETRY &#9662;";
+};
+function geoSummary(g){
+  if(!g) return "";
+  if(!g.exists) return "STL not found: "+g.stl;
+  const t=g.tris?g.tris.toLocaleString()+" triangles":"unreadable STL";
+  return g.stl+" · "+t+(g.sdf_stale?" · distance field stale, rebuild it before projecting":"");
+}
+function setGeoInfo(g){
+  if(!g) return;
+  S.geometry=g;
+  if($("geostl")){ $("geostl").value=g.stl||""; $("geostl").title=g.stl||""; }
+  if($("geostat")) $("geostat").textContent=geoSummary(g);
+}
+$("geoapply").onclick=async ()=>{
+  const p=($("geostl").value||"").trim();
+  if(!p){ setStat("geometry: enter the STL path"); return; }
+  busy($("geoapply"), true);
+  try{
+    const r=await fetch("/api/geometry",{method:"POST",headers:{"Content-Type":"application/json"},
+                                        body:JSON.stringify({stl:p})});
+    const g=await r.json().catch(()=>({}));
+    if(!r.ok || g.error) throw new Error(g.error||("geometry request failed: "+r.status));
+    setGeoInfo(g);
+    // the pick mesh and the hidden-line occluder hold the old triangles
+    if(carPick){ scene.remove(carPick); carPick.geometry.dispose(); carPick=null; }
+    if(hideMesh){ scene.remove(hideMesh); hideMesh=null; }
+    await loadCar(6);
+    log("geometry: "+g.stl+" ("+(g.tris||0)+" triangles)");
+    if(g.sdf_stale)
+      log("geometry: distance field is stale — rebuild it (Projection ▸ Distance field) before projecting");
+    setStat("geometry loaded · "+(g.tris||0)+" triangles"+(g.sdf_stale?" · distance field stale":""));
+  }catch(e){
+    setStat("geometry: "+(e&&e.message?e.message:e));
+    log("geometry failed: "+e);
+  }finally{ busy($("geoapply"), false); }
+};
 $("domhead").onclick=()=>{
   const w=$("domwrap"), open=w.style.display!=="none";
   w.style.display=open?"none":"";
@@ -1974,7 +2002,7 @@ function renderClickPt(){
    in range it also shows the vertex number, its grid index (i,j,k) and whether
    it carries a projection. Lives in #pickinfo (unlike #glstat, it does not
    clear on the next log line). */
-function clearPickInfo(){ const el=$("pickinfo"); if(el) el.innerHTML=""; }
+function clearPickInfo(){ const el=$("pickinfo"); if(el) el.innerHTML='<span class="mut">xyz</span>'; }
 document.addEventListener("pointerdown",ev=>{ const v=$("view"); if(v&&!v.contains(ev.target)) clearPickInfo(); });
 /* Block geometry restored from /api/interface. */
 let showMode = "dead";
@@ -2249,7 +2277,7 @@ function pinKey(vid){
 /* ---- persistent pick readout ---- */
 function showPickInfo(pt, vidx){
   const el=$("pickinfo"); if(!el) return;
-  if(!pt||typeof pt.x!=="number"){ el.innerHTML=""; return; }
+  if(!pt||typeof pt.x!=="number"){ el.innerHTML='<span class="mut">xyz</span>'; return; }
   const f=n=>Number(n).toFixed(3);
   let h=`<span class="mut">xyz</span> <b>${f(pt.x)}, ${f(pt.y)}, ${f(pt.z)}</b>`;
   if(vidx!==null&&vidx!==undefined){
@@ -2549,6 +2577,7 @@ $("sldcbtn").onclick=()=>setVertexTool("slide");
     const tables = await api("/api/tables");
     S.tables = tables;
     S.domain = tables.domain || S.domain;
+    setGeoInfo(tables.geometry);
     const savedGrid = await api("/api/read_dict");
     if (savedGrid && savedGrid.x && savedGrid.y && savedGrid.z) {
       S.splits = {x:[...savedGrid.x], y:[...savedGrid.y], z:[...savedGrid.z]};

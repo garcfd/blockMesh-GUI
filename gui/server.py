@@ -26,7 +26,11 @@ from urllib.parse import urlparse, parse_qs
 CASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GUI = os.path.join(CASE, "gui")
 SYS = os.path.join(CASE, "system")
-STL = os.path.join(CASE, "car_simplified.stl")
+# Geometry (STL) location: chosen in the GUI "Geometry" panel and persisted in
+# system/geometry.json. Relative paths are resolved against the case directory.
+GEOMETRY_CFG = os.path.join(SYS, "geometry.json")
+DEFAULT_STL = os.path.join("constant", "geometry", "car_simplified.stl")
+LEGACY_STL = "car_simplified.stl"
 GENERATOR = os.path.join(SYS, "make_car_blockMeshDict.py")
 sys.path.insert(0, SYS)
 from sdf import load_field, reload_field
@@ -379,6 +383,37 @@ def build_interface(xs, ys, zs, solid_ov, fluid_ov, method="raycast", nlines=Non
             for i in range(nx + 1):
                 y2, z2 = _deform(xs[i], ys[j], zs[k], flat)
                 V[vid(i, j, k)] = (xs[i], y2, z2)
+    # Outer boundary orthogonalization (Top, Sides, Inlet, Outlet)
+    for i in range(nx + 1):
+        for k in range(nz + 1):
+            V[vid(i, ny, k)] = (V[vid(i, ny - 1, k)][0], ys[-1], V[vid(i, ny - 1, k)][2])
+
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            if j == 0:
+                continue
+            V[vid(i, j, 0)] = (V[vid(i, j, 1)][0], V[vid(i, j, 1)][1], zs[0])
+            V[vid(i, j, nz)] = (V[vid(i, j, nz - 1)][0], V[vid(i, j, nz - 1)][1], zs[-1])
+
+    for j in range(ny + 1):
+        if j == 0:
+            continue
+        for k in range(nz + 1):
+            V[vid(0, j, k)] = (xs[0], V[vid(1, j, k)][1], V[vid(1, j, k)][2])
+            V[vid(nx, j, k)] = (xs[-1], V[vid(nx - 1, j, k)][1], V[vid(nx - 1, j, k)][2])
+
+    for ci in (0, nx):
+        for cj in (0, ny):
+            for ck in (0, nz):
+                V[vid(ci, cj, ck)] = (xs[ci], ys[cj], zs[ck])
+
+    for i in range(1, nx):
+        V[vid(i, ny, 0)] = (V[vid(i, ny - 1, 1)][0], ys[-1], zs[0])
+        V[vid(i, ny, nz)] = (V[vid(i, ny - 1, nz - 1)][0], ys[-1], zs[-1])
+    for k in range(1, nz):
+        V[vid(0, ny, k)] = (xs[0], ys[-1], V[vid(1, ny - 1, k)][2])
+        V[vid(nx, ny, k)] = (xs[-1], ys[-1], V[vid(nx - 1, ny - 1, k)][2])
+
     solid = np.zeros((nx, ny, nz), dtype=bool)
     centres = {}
     clist = []
@@ -570,10 +605,102 @@ _sdf_surface_cache = {}
 _lock = threading.Lock()
 
 
-def load_stl():
-    if "t" not in _stl_cache:
+def _stl_rel():
+    """STL path as configured (relative to the case if possible), or the default."""
+    try:
+        with open(GEOMETRY_CFG) as f:
+            rel = json.load(f).get("stl")
+        if isinstance(rel, str) and rel.strip():
+            return rel.strip().replace("\\", "/")
+    except (OSError, ValueError, AttributeError):
+        pass
+    if os.path.isfile(os.path.join(CASE, DEFAULT_STL)):
+        return DEFAULT_STL.replace(os.sep, "/")
+    return LEGACY_STL
+
+
+def _stl_path():
+    """Absolute path of the geometry STL currently selected in the GUI."""
+    rel = _stl_rel()
+    return rel if os.path.isabs(rel) else os.path.join(CASE, rel)
+
+
+def _stl_tris(path=None):
+    """Triangle count of a binary STL, or None if the file is not one."""
+    p = path or _stl_path()
+    try:
+        size = os.path.getsize(p)
+        with open(p, "rb") as f:
+            f.read(80)
+            n = struct.unpack("<I", f.read(4))[0]
+    except (OSError, struct.error):
+        return None
+    return n if size == 84 + 50 * n else None
+
+
+_stl_sha_cache = {}
+
+
+def _stl_sha(path=None):
+    """SHA-256 of the STL (cached on path/size/mtime), or None if unreadable."""
+    import hashlib
+    p = os.path.abspath(path or _stl_path())
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    key = (p, st.st_size, st.st_mtime_ns)
+    if _stl_sha_cache.get("key") != key:
+        h = hashlib.sha256()
+        try:
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        _stl_sha_cache.clear()
+        _stl_sha_cache.update({"key": key, "sha": h.hexdigest()})
+    return _stl_sha_cache["sha"]
+
+
+def _sdf_stale(stl):
+    """True when the distance field was not built from this exact STL."""
+    try:
+        with open(os.path.join(SYS, "car_sdf.json")) as f:
+            meta = json.load(f)
+    except (OSError, ValueError):
+        return True
+    ref = meta.get("source_sha256")
+    if not ref:
+        src = meta.get("source")
+        if not src:
+            return True
+        sp = src if os.path.isabs(src) else os.path.join(CASE, src)
+        # old metadata: compare the recorded source's bytes instead
+        ref = _stl_sha(sp)
+    if not ref:
+        return True
+    cur = _stl_sha(stl)
+    return cur is None or cur != ref
+
+
+def _geometry_info():
+    """What the GUI shows in the Geometry panel. Never raises."""
+    rel = _stl_rel()
+    p = _stl_path()
+    info = {"stl": rel, "exists": os.path.isfile(p), "tris": None,
+            "sdf_stale": True}
+    if info["exists"]:
+        info["tris"] = _stl_tris(p)
+    info["sdf_stale"] = _sdf_stale(p)
+    return info
+
+
+def load_stl(path=None):
+    p = path or _stl_path()
+    if _stl_cache.get("path") != p or "t" not in _stl_cache:
         import numpy as np
-        with open(STL, "rb") as f:
+        with open(p, "rb") as f:
             f.read(80)
             n = struct.unpack("<I", f.read(4))[0]
             raw = f.read()
@@ -585,6 +712,7 @@ def load_stl():
             T0[i] = v[3:6]
             T1[i] = v[6:9]
             T2[i] = v[9:12]
+        _stl_cache["path"] = p
         _stl_cache["t"] = (T0, T1, T2)
     return _stl_cache["t"]
 
@@ -1441,7 +1569,7 @@ _opt = {"running": False, "cancel": False, "done": False, "log": [], "iter": 0,
 _OPT_BLOCKED = ("/api/pinpatch", "/api/unpin", "/api/export", "/api/blockMesh",
                 "/api/checkmesh", "/api/modify", "/api/saveover", "/api/savepins",
                 "/api/interface", "/api/interface_edges", "/api/setvertices",
-                "/api/sdf/build")
+                "/api/sdf/build", "/api/geometry")
 
 
 def _opt_running():
@@ -2203,7 +2331,8 @@ class H(BaseHTTPRequestHandler):
                         "under": UNDER, "ground": GROUND, "belt": BELT,
                         "wheels": {"fx": [FX0, FX1], "rx": [RX0, RX1],
                                    "zin": WZIN, "zout": WZOUT, "top": WTOP},
-                        "tuned": TUNED, "domain": DOMAIN})
+                        "tuned": TUNED, "domain": DOMAIN,
+                        "geometry": _geometry_info()})
         elif u.path == "/api/dict":
             with open(os.path.join(SYS, "blockMeshDict"), "rb") as f:
                 self._send(200, f.read(), "text/plain", name="blockMeshDict")
@@ -2361,6 +2490,39 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if u.path in _OPT_BLOCKED and _opt_running():
             return self._json({"error": "the mesh optimiser is running - stop it first"}, 409)
+        if u.path == "/api/geometry":
+            # Geometry (STL) location, set from the GUI panel above the domain.
+            # Persisted in system/geometry.json so the exporter and the SDF
+            # builder read the very same file.
+            try:
+                raw = data.get("stl", "")
+                if not isinstance(raw, str) or not raw.strip():
+                    return self._json({"error": "STL path required"}, 400)
+                p = raw.strip().strip('"').strip("'")
+                full = os.path.normpath(p if os.path.isabs(p)
+                                        else os.path.join(CASE, p))
+                if not os.path.isfile(full):
+                    return self._json({"error": "no such file: %s" % full}, 400)
+                tris = _stl_tris(full)
+                if tris is None:
+                    return self._json(
+                        {"error": "%s is not a binary STL (expected 84 + 50*n bytes); "
+                                  "export the geometry as a binary STL" % full}, 400)
+                rel = os.path.relpath(full, CASE)
+                rel = full if rel.startswith("..") else rel
+                rel = rel.replace("\\", "/")
+                old = _stl_rel()
+                with open(GEOMETRY_CFG, "w") as f:
+                    json.dump({"stl": rel}, f, indent=2)
+                _stl_cache.clear()
+                _sdf_surface_cache.clear()
+                for _k in ("smooth", "cent_smooth", "cr_smooth"):
+                    _snap_cache.pop(_k, None)
+                info = _geometry_info()
+                info.update({"ok": True, "changed": rel != old, "tris": tris})
+                return self._json(info)
+            except OSError as e:
+                return self._json({"error": "cannot use that geometry: %s" % e}, 400)
         if u.path == "/api/sdf/build":
             global SDF
             try:
