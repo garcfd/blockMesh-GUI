@@ -25,9 +25,34 @@ import vtk
 from vtk.util.numpy_support import vtk_to_numpy
 
 CASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-STL = os.path.join(CASE, "car_simplified.stl")
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def geometry_stl(case):
+    """STL selected in the GUI (system/geometry.json), else the old default."""
+    try:
+        with open(os.path.join(case, "system", "geometry.json")) as f:
+            rel = json.load(f).get("stl")
+        if isinstance(rel, str) and rel.strip():
+            rel = rel.strip()
+            return rel if os.path.isabs(rel) else os.path.join(case, rel)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return os.path.join(case, "constant", "geometry", "car_simplified.stl")
+
+
+STL = os.environ.get("BLOCKMESH_STL") or geometry_stl(CASE)
 OUT = os.path.join(HERE, "car_sdf.npy")
+
+
+def sha256(path):
+    """Fingerprint of the geometry, so the GUI can tell when the field is stale."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 # Close bounds with a little margin so Newton projection never lands on a cap.
 BOUNDS = (-2.40, 2.40, -0.72, 0.82, -1.14, 1.14)
 
@@ -196,7 +221,8 @@ def main():
     np.save(OUT, field, allow_pickle=False)
     with open(os.path.splitext(OUT)[0] + ".json", "w", encoding="utf-8") as f:
         json.dump({"origin": origin, "spacing": spacing, "shape_xyz": dims,
-                   "source": "car_simplified.stl",
+                   "source": os.path.relpath(os.path.abspath(STL), CASE),
+                   "source_sha256": sha256(STL),
                    "method": "exact signed distance to STL triangles in a "
                              "%g cm band, ramped beyond" % band_cm,
                    "band_cm": band_cm, "stride": stride,

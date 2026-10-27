@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Body-fitted blockMesh for car_simplified.stl (no snappyHexMesh).
+"""Body-fitted blockMesh for a car STL (no snappyHexMesh).
+
+The STL location is the one chosen in the GUI (Geometry panel, persisted in
+system/geometry.json); BLOCKMESH_STL overrides it.
 
 OPTIMUM SMOOTH BLOCKING STRATEGY
 --------------------------------
@@ -18,19 +21,35 @@ This keeps every wall edge ON the surface while subdivided cells stay valid.
 Run:  python3 make_car_blockMeshDict.py  (run from case dir)
       -> writes system/blockMeshDict
 """
+import json
 import struct
 import sys
 import os
 import numpy as np
 
 CASE = os.environ.get("BLOCKMESH_CASE", "/home/garcfd/working/blockMesh-car")
-STL = os.path.join(CASE, "car_simplified.stl")
+
+
+def geometry_stl(case):
+    """STL selected in the GUI (system/geometry.json), else the old default."""
+    try:
+        with open(os.path.join(case, "system", "geometry.json")) as f:
+            rel = json.load(f).get("stl")
+        if isinstance(rel, str) and rel.strip():
+            rel = rel.strip()
+            return rel if os.path.isabs(rel) else os.path.join(case, rel)
+    except (OSError, ValueError, AttributeError):
+        pass
+    return os.path.join(case, "constant", "geometry", "car_simplified.stl")
+
+
+STL = os.environ.get("BLOCKMESH_STL") or geometry_stl(CASE)
 OUT = os.path.join(CASE, "system", "blockMeshDict")
 SDF_PATH = os.path.join(CASE, "system", "car_sdf.npy")
 sys.path.insert(0, os.path.dirname(__file__))
+
 from sdf import load_field
 SDF = load_field(SDF_PATH)
-
 
 def backup_dict():
     """Keep the previous blockMeshDict as blockMeshDict.bak before overwriting.
@@ -48,7 +67,7 @@ def backup_dict():
         pass
 
 # ---------------------------------------------------------------- STL load
-print("loading STL...", file=sys.stderr)
+print("loading STL %s ..." % STL, file=sys.stderr)
 with open(STL, "rb") as f:
     f.read(80)
     ntri = struct.unpack("<I", f.read(4))[0]
@@ -127,7 +146,7 @@ _TRI = {}
 def _load_triangles():
     if "t" not in _TRI:
         import struct as _st
-        with open(os.path.join(CASE, "car_simplified.stl"), "rb") as _f:
+        with open(STL, "rb") as _f:
             _f.read(80)
             _n = _st.unpack("<I", _f.read(4))[0]
             _raw = _f.read()
@@ -544,6 +563,7 @@ def solid_or_none(i, j, k):
     return None
 
 blocks = []  # (hv, nc, g)
+block_ijk = {}
 patches = {"inlet": [], "outlet": [], "sides": [], "top": [], "ground": [], "body": []}
 vert_out = {}  # vertex -> summed fluid->solid neighbour dirs (points inward)
 for k in range(nz):
@@ -555,6 +575,7 @@ for k in range(nz):
                   vid(i, j, k + 1), vid(i + 1, j, k + 1), vid(i + 1, j + 1, k + 1), vid(i, j + 1, k + 1)]
             nc = (x_lines[i + 1][1], y_lines[j + 1][1], z_lines[k + 1][1])
             g = (x_lines[i + 1][2], y_lines[j + 1][2], z_lines[k + 1][2])
+            block_ijk[len(blocks)] = (i, j, k)
             blocks.append((hv, nc, g))
             for d, loc in FACES:
                 nb = solid_or_none(i + d[0], j + d[1], k + d[2])
@@ -1107,6 +1128,188 @@ for _v in _wall_vertices:
         snapped[_v] = _start
         _wall_rejected += 1
 print(f"body vertices projected onto SDF: {_wall_moved}; kept for block validity: {_wall_rejected}", file=sys.stderr)
+
+# ------------------------------------------------- outer boundary orthogonalization
+def _orthogonalize_outer_boundaries():
+    # 1. Top boundary (j = ny): match x, z to layer below (j = ny - 1), pin y to ys[-1]
+    for i in range(nx + 1):
+        for k in range(nz + 1):
+            v_out = vid(i, ny, k)
+            v_in = vid(i, ny - 1, k)
+            snapped[v_out][0] = float(snapped[v_in][0])
+            snapped[v_out][1] = float(ys[-1])
+            snapped[v_out][2] = float(snapped[v_in][2])
+
+    # 2. Side boundaries (k = 0 and k = nz): match x, y to adjacent layer, pin z
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            if j == 0:
+                continue  # ground kept as-is
+            # -z side
+            v_out_lo = vid(i, j, 0)
+            v_in_lo = vid(i, j, 1)
+            snapped[v_out_lo][0] = float(snapped[v_in_lo][0])
+            snapped[v_out_lo][1] = float(snapped[v_in_lo][1])
+            snapped[v_out_lo][2] = float(zs[0])
+
+            # +z side
+            v_out_hi = vid(i, j, nz)
+            v_in_hi = vid(i, j, nz - 1)
+            snapped[v_out_hi][0] = float(snapped[v_in_hi][0])
+            snapped[v_out_hi][1] = float(snapped[v_in_hi][1])
+            snapped[v_out_hi][2] = float(zs[-1])
+
+    # 3. Inlet boundary (i = 0): match y, z to i = 1, pin x to xs[0]
+    for j in range(ny + 1):
+        if j == 0:
+            continue  # ground kept as-is
+        for k in range(nz + 1):
+            v_out = vid(0, j, k)
+            v_in = vid(1, j, k)
+            snapped[v_out][0] = float(xs[0])
+            snapped[v_out][1] = float(snapped[v_in][1])
+            snapped[v_out][2] = float(snapped[v_in][2])
+
+    # 4. Outlet boundary (i = nx): match y, z to i = nx - 1, pin x to xs[-1]
+    for j in range(ny + 1):
+        if j == 0:
+            continue  # ground kept as-is
+        for k in range(nz + 1):
+            v_out = vid(nx, j, k)
+            v_in = vid(nx - 1, j, k)
+            snapped[v_out][0] = float(xs[-1])
+            snapped[v_out][1] = float(snapped[v_in][1])
+            snapped[v_out][2] = float(snapped[v_in][2])
+
+    # 5. Fix 8 domain box corners
+    for ci in (0, nx):
+        for cj in (0, ny):
+            for ck in (0, nz):
+                snapped[vid(ci, cj, ck)] = [float(xs[ci]), float(ys[cj]), float(zs[ck])]
+
+    # 6. Align box edges cleanly between intersecting outer boundary planes:
+    for i in range(1, nx):
+        snapped[vid(i, ny, 0)] = [float(snapped[vid(i, ny - 1, 1)][0]), float(ys[-1]), float(zs[0])]
+        snapped[vid(i, ny, nz)] = [float(snapped[vid(i, ny - 1, nz - 1)][0]), float(ys[-1]), float(zs[-1])]
+    for k in range(1, nz):
+        snapped[vid(0, ny, k)] = [float(xs[0]), float(ys[-1]), float(snapped[vid(1, ny - 1, k)][2])]
+        snapped[vid(nx, ny, k)] = [float(xs[-1]), float(ys[-1]), float(snapped[vid(nx - 1, ny - 1, k)][2])]
+
+_orthogonalize_outer_boundaries()
+print("outer boundaries orthogonalized (top, sides, inlet, outlet)", file=sys.stderr)
+
+# ------------------------------------------------- outer block grading calculation
+def _slab_cell_sizes(L, n, g):
+    if n <= 1 or abs(g - 1.0) < 1e-9:
+        d = L / max(n, 1)
+        return d, d
+    t = g ** (1.0 / (n - 1))
+    if abs(t - 1.0) < 1e-9:
+        d = L / n
+        return d, d
+    d0 = L * (t - 1.0) / (t ** n - 1.0)
+    return d0, d0 * (t ** (n - 1))
+
+def _solve_growth_ratio(L, n, d):
+    if n <= 1 or d <= 0 or L <= 0:
+        return 1.0
+    avg = L / float(n)
+    if abs(avg - d) < 1e-9:
+        return 1.0
+    target = L / d
+    if target < n:
+        lo, hi = 0.01, 1.0
+    else:
+        lo, hi = 1.0, 50.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if abs(mid - 1.0) < 1e-9:
+            val = float(n)
+        else:
+            val = (mid ** n - 1.0) / (mid - 1.0)
+        if val < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+# Precalculate adjacent inner slab cell sizes
+_d_adj_inlet = None
+if len(x_lines) > 2 and x_lines[2][1] > 0:
+    _L = xs[2] - xs[1]
+    _d_adj_inlet, _ = _slab_cell_sizes(_L, x_lines[2][1], x_lines[2][2])
+
+_d_adj_outlet = None
+if len(x_lines) > 2 and x_lines[-2][1] > 0:
+    _L = xs[-2] - xs[-3]
+    _, _d_adj_outlet = _slab_cell_sizes(_L, x_lines[-2][1], x_lines[-2][2])
+
+_d_adj_top = None
+if len(y_lines) > 2 and y_lines[-2][1] > 0:
+    _L = ys[-2] - ys[-3]
+    _, _d_adj_top = _slab_cell_sizes(_L, y_lines[-2][1], y_lines[-2][2])
+
+_d_adj_side_lo = None
+if len(z_lines) > 2 and z_lines[2][1] > 0:
+    _L = zs[2] - zs[1]
+    _d_adj_side_lo, _ = _slab_cell_sizes(_L, z_lines[2][1], z_lines[2][2])
+
+_d_adj_side_hi = None
+if len(z_lines) > 2 and z_lines[-2][1] > 0:
+    _L = zs[-2] - zs[-3]
+    _, _d_adj_side_hi = _slab_cell_sizes(_L, z_lines[-2][1], z_lines[-2][2])
+
+# Slab-consistent outer block gradings (required by OpenFOAM multi-block face merging)
+_gy_top_slab = None
+if len(y_lines) > 2 and _d_adj_top is not None and y_lines[-1][1] >= 2:
+    _Ly_slab = ys[-1] - ys[-2]
+    _t = _solve_growth_ratio(_Ly_slab, y_lines[-1][1], _d_adj_top)
+    _gy_top_slab = min(max(_t ** (y_lines[-1][1] - 1), 0.01), 100.0)
+
+_gz_side_lo_slab = None
+if len(z_lines) > 2 and _d_adj_side_lo is not None and z_lines[1][1] >= 2:
+    _Lz_slab = zs[1] - zs[0]
+    _t = _solve_growth_ratio(_Lz_slab, z_lines[1][1], _d_adj_side_lo)
+    _gz_side_lo_slab = min(max(_t ** (-(z_lines[1][1] - 1)), 0.01), 100.0)
+
+_gz_side_hi_slab = None
+if len(z_lines) > 2 and _d_adj_side_hi is not None and z_lines[-1][1] >= 2:
+    _Lz_slab = zs[-1] - zs[-2]
+    _t = _solve_growth_ratio(_Lz_slab, z_lines[-1][1], _d_adj_side_hi)
+    _gz_side_hi_slab = min(max(_t ** (z_lines[-1][1] - 1), 0.01), 100.0)
+
+_gx_inlet_slab = None
+if len(x_lines) > 2 and _d_adj_inlet is not None and x_lines[1][1] >= 2:
+    _Lx_slab = xs[1] - xs[0]
+    _t = _solve_growth_ratio(_Lx_slab, x_lines[1][1], _d_adj_inlet)
+    _gx_inlet_slab = min(max(_t ** (-(x_lines[1][1] - 1)), 0.01), 100.0)
+
+_gx_outlet_slab = None
+if len(x_lines) > 2 and _d_adj_outlet is not None and x_lines[-1][1] >= 2:
+    _Lx_slab = xs[-1] - xs[-2]
+    _t = _solve_growth_ratio(_Lx_slab, x_lines[-1][1], _d_adj_outlet)
+    _gx_outlet_slab = min(max(_t ** (x_lines[-1][1] - 1), 0.01), 100.0)
+
+_new_blocks = []
+for _b_idx, (_hv, _nc, _g) in enumerate(blocks):
+    _i, _j, _k = block_ijk[_b_idx]
+    _gx, _gy, _gz = _g
+
+    if _j == ny - 1 and _gy_top_slab is not None:
+        _gy = _gy_top_slab
+    if _k == 0 and _gz_side_lo_slab is not None:
+        _gz = _gz_side_lo_slab
+    elif _k == nz - 1 and _gz_side_hi_slab is not None:
+        _gz = _gz_side_hi_slab
+    if _i == 0 and _gx_inlet_slab is not None:
+        _gx = _gx_inlet_slab
+    elif _i == nx - 1 and _gx_outlet_slab is not None:
+        _gx = _gx_outlet_slab
+
+    _new_blocks.append((_hv, _nc, (_gx, _gy, _gz)))
+
+blocks = _new_blocks
+print("outer blocks grading calculated based on orthogonalized slab lengths", file=sys.stderr)
 
 # ------------------------------------------------- FULL edge projection
 # Every wall edge gets a polyLine whose intermediates are projected onto the
