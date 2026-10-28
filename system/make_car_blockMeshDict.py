@@ -339,6 +339,7 @@ def _auto_lines(coords, axis):
 # into the (nx,ny,nz) block grid. Applied AFTER the analytic test, so manual
 # selection always wins. Out-of-range entries are ignored with a warning.
 _OVERRIDES = {"solid": [], "fluid": []}
+_GRADE_OVERRIDES = {}   # region key ("xmin".."zmax") -> override grading value (or absent)
 _PINS = {}
 # Fit-first mode: splits.json {"snap_all": true} snaps EVERY near-car surface
 # vertex to its closest STL point regardless of distance, and skips all
@@ -381,6 +382,10 @@ try:
         _FLAT = bool(_d.get("flat", False))
         if _FLAT:
             print("FLAT: Cartesian planes, no drape", file=sys.stderr)
+        _go = _d.get("grade_overrides", {})
+        if isinstance(_go, dict):
+            _GRADE_OVERRIDES = {str(k): v for k, v in _go.items()
+                                if k in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax")}
         _pv = _d.get("pins", {})
         if isinstance(_pv, dict):
             # pins keyed "x|y|z" of base grid planes (survive splits edits);
@@ -1292,9 +1297,29 @@ _GRADE = {}        # (axis, slab) -> simpleGrading ratio of that outer slab
 _G_ROWS = []
 _G_REPORT = None
 _sol_idx = np.argwhere(solid)
+_MACRO_VALUES = {}
+_REGION_TO_SLAB = {"xmin": (0, 0), "xmax": (0, nx - 1),
+                   "ymin": (1, 0), "ymax": (1, ny - 1),
+                   "zmin": (2, 0), "zmax": (2, nz - 1)}
 if len(_sol_idx) == 0:
     _G_REPORT = {"error": "no dead (solid) blocks found - nothing to match the outer blocks to"}
     print("outer block grading skipped: " + _G_REPORT["error"], file=sys.stderr)
+    _MACRO_VALUES = {}
+    _REGION_TO_SLAB = {"xmin": (0, 0), "xmax": (0, nx - 1),
+                       "ymin": (1, 0), "ymax": (1, ny - 1),
+                       "zmin": (2, 0), "zmax": (2, nz - 1)}
+    for _rk, (_ra, _rsl) in _REGION_TO_SLAB.items():
+        _ln = (x_lines, y_lines, z_lines)[_ra]
+        try:
+            _v = _ln[_rsl + 1][2]
+        except (IndexError, TypeError):
+            _v = 1.0
+        if _rk in _GRADE_OVERRIDES:
+            try:
+                _v = float(_GRADE_OVERRIDES[_rk])
+            except (TypeError, ValueError):
+                pass
+        _MACRO_VALUES[_rk] = _v
 else:
     _LINES = (x_lines, y_lines, z_lines)
     _NN = (nx, ny, nz)
@@ -1346,6 +1371,31 @@ else:
                                 "old_g": _old_g, "new_g": _g, "growth": _t,
                                 "mismatch_min": _rmin, "mismatch_max": _rmax,
                                 "note": _note})
+    # Apply user overrides to the outermost slab of each region.
+    _REGION_TO_SLAB = {"xmin": (0, 0), "xmax": (0, nx - 1),
+                       "ymin": (1, 0), "ymax": (1, ny - 1),
+                       "zmin": (2, 0), "zmax": (2, nz - 1)}
+    for _rk, (_ra, _rsl) in _REGION_TO_SLAB.items():
+        if _rk in _GRADE_OVERRIDES:
+            try:
+                _GRADE[(_ra, _rsl)] = float(_GRADE_OVERRIDES[_rk])
+            except (TypeError, ValueError):
+                pass
+    _MACRO_VALUES = {}
+    for _rk, (_ra, _rsl) in _REGION_TO_SLAB.items():
+        _v = _GRADE.get((_ra, _rsl))
+        if _v is None:
+            _ln = (x_lines, y_lines, z_lines)[_ra]
+            try:
+                _v = _ln[_rsl + 1][2]
+            except (IndexError, TypeError):
+                _v = 1.0
+        if _rk in _GRADE_OVERRIDES:
+            try:
+                _v = float(_GRADE_OVERRIDES[_rk])
+            except (TypeError, ValueError):
+                pass
+        _MACRO_VALUES[_rk] = _v
     _worst = max([max(r["mismatch_max"], 1.0 / r["mismatch_min"]) for r in _G_ROWS] or [1.0])
     _G_REPORT = {"slabs": len(_G_ROWS),
                  "changed": sum(1 for r in _G_ROWS if abs(r["new_g"] - r["old_g"]) > 1e-9),
@@ -1686,13 +1736,33 @@ convertToMeters 1;
 """)
     import json as _jsplit
     f.write("// SPLITS: %s\n" % _jsplit.dumps({"x": xs, "y": ys, "z": zs}))
+    # Grading macros: outermost-slab simpleGrading ratios, editable in one place.
+    # A leading '$' in the blocks below refers to these (OpenFOAM dict substitution).
+    f.write("// GRADING (override in the GUI or edit these): \n")
+    for _rk in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
+        f.write("g%s %.6g;\n" % (_rk, _MACRO_VALUES.get(_rk, 1.0)))
     f.write("\nvertices\n(\n")
     for p in snapped:
         f.write("    (%.6g %.6g %.6g)\n" % tuple(p))
     f.write(");\n\nblocks\n(\n")
-    for hv, nc, g in blocks:
-        f.write("    hex (%s) (%d %d %d) simpleGrading (%.6g %.6g %.6g)\n"
-                % (" ".join(map(str, hv)), nc[0], nc[1], nc[2], g[0], g[1], g[2]))
+    for _b_idx, (_hv, _nc, _g) in enumerate(blocks):
+        _ijk = block_ijk.get(_b_idx, (0, 0, 0)) if isinstance(block_ijk, dict) else block_ijk[_b_idx]
+        _parts = []
+        for _a in range(3):
+            _na = (nx, ny, nz)[_a]
+            _slab = _ijk[_a]
+            _macro = None
+            if _slab == 0:
+                _macro = "gxmin" if _a == 0 else ("gymin" if _a == 1 else "gzmin")
+            elif _slab == _na - 1:
+                _macro = "gxmax" if _a == 0 else ("gymax" if _a == 1 else "gzmax")
+            if _macro is not None:
+                _parts.append("$" + _macro)
+            else:
+                _parts.append("%.6g" % _g[_a])
+        f.write("    hex (%s) (%d %d %d) simpleGrading (%s %s %s)\n"
+                % (" ".join(map(str, _hv)), _nc[0], _nc[1], _nc[2],
+                   _parts[0], _parts[1], _parts[2]))
     f.write(");\n\nedges\n(\n")
     for a, b, pts in edges_out:
         f.write("    polyLine %d %d (" % (a, b))
