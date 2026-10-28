@@ -6,7 +6,7 @@
 - `gui/index.html`
 - `gui/vendor/three.min.js`
 - `gui/vendor/OrbitControls.js`
-- `car_simplified.stl`
+- `constant/geometry/car_simplified.stl`
 - `system/sdf.py`
 - `system/make_car_blockMeshDict.py`
 - `system/build_car_sdf.py`
