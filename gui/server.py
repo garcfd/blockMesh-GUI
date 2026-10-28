@@ -509,95 +509,18 @@ def build_interface(xs, ys, zs, solid_ov, fluid_ov, method="raycast", nlines=Non
                        "voted": int(vote_info.get("voted", 0))}}
 
 # ---------------------------------------------------------------------------
-# Grading of the OUTER (live) slabs so their cells match the INNER (dead/solid)
-# blocks. Grading lives in splits.json as per-interval lines [coord, n, g]
-# (g = simpleGrading expansion ratio = last cell / first cell, increasing coord).
+# Block grading of the OUTER (live) slabs is calculated ONLY in
+# make_car_blockMeshDict.py (from the actual draped slab lengths). The generator
+# writes system/grading_report.json on every run; the server just reports it.
 # ---------------------------------------------------------------------------
-def _slab_cells(L, n, g):
-    """(first, last) cell size of a slab of length L, n cells, ratio g=last/first."""
-    n = max(int(n), 1)
-    if n == 1 or abs(g - 1.0) < 1e-12:
-        return L / n, L / n
-    q = g ** (1.0 / (n - 1))
-    first = L * (q - 1.0) / (q ** n - 1.0)
-    return first, first * g
-
-
-def _solve_growth(L, n, d):
-    """Per-cell growth t so that d*(1+t+...+t^(n-1)) = L (None if impossible)."""
-    if n < 2 or d <= 0 or L / d < 1.0 + 1e-12:
+def _grading_report():
+    """What the generator's outer-slab grading did on its last run, or None."""
+    try:
+        with open(os.path.join(SYS, "grading_report.json")) as f:
+            r = json.load(f)
+        return r if isinstance(r, dict) else None
+    except (OSError, ValueError):
         return None
-    target = L / d
-
-    def f(t):
-        return n if abs(t - 1.0) < 1e-12 else (t ** n - 1.0) / (t - 1.0)
-    lo, hi = 1e-3, min(1e3, 10 ** (250.0 / n))
-    if f(lo) > target or f(hi) < target:
-        return None
-    for _ in range(200):
-        mid = (lo * hi) ** 0.5
-        if f(mid) < target:
-            lo = mid
-        else:
-            hi = mid
-    return (lo * hi) ** 0.5
-
-
-def _grade_outer_lines(xs, ys, zs, solid_ov, fluid_ov, flat=False, max_ratio=100.0, lines0=None):
-    """New per-axis lines with the outer slabs graded to match the inner cells.
-    Returns ({"x":lines,"y":lines,"z":lines}, plan rows, summary dict)."""
-    import math
-    info = build_interface(xs, ys, zs, solid_ov, fluid_ov, "raycast", None, flat)
-    sol = [b["k"] for b in info["blocks"] if b["s"]]
-    if not sol:
-        raise ValueError("no dead (solid) blocks found - nothing to match the outer blocks to")
-    coords = {"x": sorted(xs), "y": sorted(ys), "z": sorted(zs)}
-    out, plan = {}, []
-    for a, ax in enumerate("xyz"):
-        src = lines0[ax] if lines0 else _resolve_lines(coords[ax], ax)
-        lines = [[float(c), int(n), float(g)] for c, n, g in src]
-        idx = sorted({k[a] for k in sol})
-        lo, hi = idx[0], idx[-1]
-        ns = len(lines) - 1                                   # slabs 0..ns-1 = lines[s+1]
-
-        def slab(s):
-            return lines[s + 1][0] - lines[s][0], lines[s + 1][1], lines[s + 1][2]
-        for side, order in (("low", range(lo - 1, -1, -1)), ("high", range(hi + 1, ns))):
-            for s in order:
-                L, n, g_old = slab(s)
-                nb = s + 1 if side == "low" else s - 1        # slab next to it, towards the car
-                Lb, nbn, gb = slab(nb)
-                fb, lb = _slab_cells(Lb, nbn, gb)
-                d_adj = fb if side == "low" else lb           # cell size at the shared plane
-                row = {"axis": ax, "slab": s, "side": side, "c0": lines[s][0],
-                       "c1": lines[s + 1][0], "n": n, "old_g": g_old,
-                       "match_mm": d_adj * 1000.0, "note": ""}
-                t = _solve_growth(L, n, d_adj) if n >= 2 else None
-                if t is None:
-                    g_new = 1.0
-                    row["note"] = ("single cell" if n < 2 else
-                                   "slab shorter than the neighbouring cell" if L / max(d_adj, 1e-12) < 1.0
-                                   else "growth out of range - increase/decrease n")
-                elif t < 1.0 - 1e-9:
-                    g_new = 1.0                                # finer than the inner cells: keep uniform
-                    row["note"] = "cells already finer than the inner ones - left uniform"
-                else:
-                    g_new = t ** (n - 1) if side == "high" else t ** (-(n - 1))
-                    gmax = float(max_ratio)
-                    if g_new > gmax or g_new < 1.0 / gmax:
-                        g_new = min(max(g_new, 1.0 / gmax), gmax)
-                        row["note"] = "grading clamped to %g" % gmax
-                f_new, l_new = _slab_cells(L, n, g_new)
-                row.update({"new_g": g_new, "growth": (t if t else 1.0),
-                            "outer_mm": (f_new if side == "low" else l_new) * 1000.0,
-                            "inner_mm_after": (l_new if side == "low" else f_new) * 1000.0})
-                lines[s + 1][2] = g_new
-                plan.append(row)
-        out[ax] = lines
-    changed = sum(1 for r in plan if abs(r["new_g"] - r["old_g"]) > 1e-9)
-    worst = max([r["growth"] for r in plan] or [1.0])
-    return out, plan, {"slabs": len(plan), "changed": changed, "max_growth": worst,
-                       "dead_blocks": len(sol)}
 
 
 _stl_cache = {}
@@ -2333,6 +2256,9 @@ class H(BaseHTTPRequestHandler):
                                    "zin": WZIN, "zout": WZOUT, "top": WTOP},
                         "tuned": TUNED, "domain": DOMAIN,
                         "geometry": _geometry_info()})
+        elif u.path == "/api/grading":
+            # outer-slab grading of the last generator run (calculated in the generator)
+            self._json(_grading_report() or {"error": "no grading report yet - press Write"})
         elif u.path == "/api/dict":
             with open(os.path.join(SYS, "blockMeshDict"), "rb") as f:
                 self._send(200, f.read(), "text/plain", name="blockMeshDict")
@@ -2629,23 +2555,14 @@ class H(BaseHTTPRequestHandler):
                     payload[_k] = _veto_boundary_pins(data[_k], _old)
                 elif _k in _old:
                     payload[_k] = _veto_boundary_pins(_old[_k], _old)
-            # Automatic block grading: each outer slab is graded in its own direction so the
-            # cell next to the inner (dead) blocks has the inner cell size - no jump in size.
-            grading = None
-            try:
-                _gl, _gp, grading = _grade_outer_lines(
-                    xs, ys, zs, solid_ov, fluid_ov, bool(payload.get("flat", False)))
-                for _ax in "xyz":
-                    payload[_ax + "_lines"] = _gl[_ax]
-            except Exception as e:
-                grading = {"error": str(e)}
+            # Outer-slab grading is calculated by the generator, not here.
             with open(os.path.join(SYS, "splits.json"), "w") as f:
                 json.dump(payload, f)
             code, log = run([sys.executable, GENERATOR], timeout=600)
             tail = "\n".join(log.strip().splitlines()[-14:])
             if code != 0:
                 return self._json({"ok": False, "log": tail})
-            out = {"ok": True, "log": tail, "grading": grading}
+            out = {"ok": True, "log": tail, "grading": _grading_report()}
             # whatever the generator left straight on the interface is curved now
             out["interface_edges"] = _refresh_interface_edges(None, missing_only=True)
             if data.get("runMesh"):
@@ -2940,15 +2857,6 @@ class H(BaseHTTPRequestHandler):
             if _nc[2]:
                 _lz[_k + 1][1] = _nc[2]
             cur["x_lines"], cur["y_lines"], cur["z_lines"] = _lx, _ly, _lz
-            _gs = None
-            try:
-                _gl, _gp, _gs = _grade_outer_lines(
-                    _bx, _by, _bz, _clean_triples(cur.get("solid", [])),
-                    _clean_triples(cur.get("fluid", [])), bool(cur.get("flat", False)),
-                    lines0={"x": _lx, "y": _ly, "z": _lz})
-                cur["x_lines"], cur["y_lines"], cur["z_lines"] = _gl["x"], _gl["y"], _gl["z"]
-            except Exception as e:
-                _gs = {"error": str(e)}
             cur.pop("auto_grade", None)                 # settings of the old on/off switch
             cur.pop("grading_mode", None)
             with open(_p, "w") as f:
@@ -2958,7 +2866,7 @@ class H(BaseHTTPRequestHandler):
             if code != 0:
                 return self._json({"ok": False, "log": tail})
             _ie = _refresh_interface_edges(None, missing_only=True)
-            return self._json({"ok": True, "log": tail, "grading": _gs, "interface_edges": _ie,
+            return self._json({"ok": True, "log": tail, "grading": _grading_report(), "interface_edges": _ie,
                                "nc": [_lx[_i + 1][1], _ly[_j + 1][1], _lz[_k + 1][1]]})
         if u.path == "/api/interface":
             try:

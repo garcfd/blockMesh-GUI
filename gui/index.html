@@ -170,6 +170,8 @@
     <button data-s="range">range only</button><button data-s="dead">dead only</button><button data-s="live">live only</button>
   </div>
   <div class="btnrow"><button class="btn ghost" id="livebtn">LIVE</button><button class="btn ghost" id="deadbtn">DEAD</button></div>
+  <div class="mut" style="margin-top:10px" title="simpleGrading expansion ratio (last cell / first cell, along +axis) of the outermost block slab on each side, as calculated by the generator at the last Write. Above 1 the cells grow with the axis, below 1 they shrink.">Outer block grading (last Write)</div>
+  <div id="gradesum" class="grid2" style="margin-top:4px"></div>
   </div>
   <h2 id="projhead" style="cursor:pointer;user-select:none">PROJECTION &#9656;</h2>
   <div id="projwrap" style="display:none">
@@ -920,6 +922,7 @@ async function refreshBlocks(){
                            solid:so, fluid:fl})});
     S.blk = r.blocks;
     S.wallq = r.wallq || [];
+    loadGradeSummary();
     // block-centre markers removed (visibility toggle deleted)
     clearGroup(blkGroup); markerKeys = []; markerPts = null;
     // interface overlay (the faces that will project onto the surface)
@@ -2366,6 +2369,40 @@ function gradeNote(g){
   if(!g) return "";
   if(g.error) return "outer blocks left ungraded ("+g.error+")";
   return `outer blocks graded (${g.slabs||0} slabs, max growth ${Number(g.max_growth||1).toFixed(2)}x per cell)`;
+}
+/* Outer-block grading factors by region (system/grading_report.json, written by the generator). */
+const GRADE_REGIONS=[["xmin","x","low"],["xmax","x","high"],["ymin","y","low"],["ymax","y","high"],["zmin","z","low"],["zmax","z","high"]];
+function renderGradeSummary(rep){
+  const el=$("gradesum"); if(!el) return;
+  el.textContent="";
+  if(!rep||rep.error){
+    const m=document.createElement("div"); m.className="mut"; m.style.gridColumn="1 / -1";
+    m.textContent=rep&&rep.error?"not graded: "+rep.error:"no grading yet - press Write";
+    el.appendChild(m); return;
+  }
+  const rows=rep.rows||[], fmt=v=>String(+Number(v).toPrecision(4));
+  for(const [lab,ax,side] of GRADE_REGIONS){
+    const rs=rows.filter(r=>r.axis===ax&&r.side===side);
+    // outermost slab of that side: highest index on the max side, lowest on the min side
+    const r=rs.length?rs.reduce((p,q)=>side==="high"?(q.slab>p.slab?q:p):(q.slab<p.slab?q:p)):null;
+    const cell=document.createElement("div"); cell.className="mut";
+    const l=document.createElement("span"); l.style.cssText="display:inline-block;width:34px"; l.textContent=lab;
+    const v=document.createElement("b"); v.style.color="var(--txt)";
+    if(r){
+      const clamped=/clamp/.test(r.note||"");
+      v.textContent=fmt(r.new_g)+(clamped?"*":"");
+      cell.title=`${lab}: slab ${r.slab}, ${r.n} cells, growth ${Number(r.growth).toFixed(3)}x per cell, `+
+        `first cell / inner cell ${Number(r.mismatch_min).toFixed(2)}-${Number(r.mismatch_max).toFixed(2)}x`+(r.note?" ("+r.note+")":"");
+    }else{
+      v.textContent="-";
+      cell.title=`${lab}: no outer slab to grade on this side`;
+    }
+    cell.appendChild(l); cell.appendChild(v); el.appendChild(cell);
+  }
+}
+async function loadGradeSummary(){
+  try{ renderGradeSummary(await api("/api/grading")); }
+  catch(e){ renderGradeSummary(null); }
 }
 /* Re-read the wall from blockMeshDict so curved edges / quads follow the
    vertex that just moved, then redraw the edge overlay. */
