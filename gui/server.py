@@ -2387,6 +2387,8 @@ class H(BaseHTTPRequestHandler):
                                        "pins": _pins if isinstance(_pins, dict) else {},
                                        "solid": _solid if isinstance(_solid, list) else [],
                                        "fluid": _fluid if isinstance(_fluid, list) else [],
+                            "grade_overrides": (_sd.get("grade_overrides")
+                                                if isinstance(_sd.get("grade_overrides"), dict) else {}),
                                        "source": "blockMeshDict"})
                 with open(os.path.join(SYS, "splits.json")) as f:
                     d = json.load(f)
@@ -2396,6 +2398,8 @@ class H(BaseHTTPRequestHandler):
                                    "pins": d.get("pins", {}) if isinstance(d.get("pins"), dict) else {},
                                    "solid": d.get("solid", []) if isinstance(d.get("solid"), list) else [],
                                    "fluid": d.get("fluid", []) if isinstance(d.get("fluid"), list) else [],
+                                   "grade_overrides": (d.get("grade_overrides")
+                                                       if isinstance(d.get("grade_overrides"), dict) else {}),
                                    "source": "splits.json"})
             except (OSError, ValueError, KeyError, TypeError) as e:
                 return self._json({"error": f"no readable splits: {e}"}, 404)
@@ -2550,6 +2554,22 @@ class H(BaseHTTPRequestHandler):
                 payload["flat"] = _old["flat"]
             if "flat" in data:
                 payload["flat"] = data["flat"]
+            # Grading overrides: per-region outermost-slab grading factors.
+            _go = None
+            if isinstance(data.get("grade_overrides"), dict):
+                _go = data["grade_overrides"]
+            elif isinstance(_old.get("grade_overrides"), dict):
+                _go = _old["grade_overrides"]
+            if isinstance(_go, dict):
+                _clean_go = {}
+                for _k, _v in _go.items():
+                    if _k in ("xmin", "xmax", "ymin", "ymax", "zmin", "zmax"):
+                        try:
+                            _clean_go[_k] = float(_v)
+                        except (TypeError, ValueError):
+                            pass
+                if _clean_go:
+                    payload["grade_overrides"] = _clean_go
             for _k in ("pins",):
                 if _k in data and isinstance(data[_k], dict):
                     payload[_k] = _veto_boundary_pins(data[_k], _old)

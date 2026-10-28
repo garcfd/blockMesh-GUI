@@ -179,6 +179,7 @@
   <div class="btnrow"><button class="btn ghost" id="selcbtn">Select vertex</button><button class="btn ghost" id="sldcbtn">Slide vertex</button></div>
   <div class="btnrow"><button class="btn ghost" id="nearbtn">Nearest surface</button><button class="btn ghost" id="smoothbtn">Smooth surface</button></div>
   <div class="btnrow"><button class="btn" id="updproj">Update projection</button><button class="btn ghost" id="undopbtn">Undo projection</button></div>
+  <div class="btnrow"><button class="btn ghost" id="sympbtn">Make symmetrical</button><button class="btn ghost" id="symprevbtn" style="display:none">CANCEL</button></div>
   </div>
   <div class="btnrow"><button class="btn" id="expbtn">Write blockMeshDict</button></div>
   <div class="btnrow"><button class="btn" id="runbmbtn">Run blockMesh</button></div>
@@ -219,6 +220,9 @@ const S = {
   blk: [],                     // [{k:[i,j,k], c:[x,y,z], s:0/1 effective}]
   domain: {xmin:-8, xmax:12, ymin:-0.59, ymax:4, zmin:-4, zmax:4},
   geometry: null,              // {stl, exists, tris, sdf_stale} from /api/tables
+  symPreview: null,            // active make-symmetrical preview state
+  symPreviewing: false,        // when true, projected edges render red
+  gradeOverrides: {},          // region -> override grading value (optional)
   tables: null,
   selected: null,
   clickPt: null,
@@ -880,6 +884,8 @@ function refreshSelHL(){
     // Draw block-face edges without a blockMesh polyLine in pale green.
     // Curved dictionary edges are overlaid below in the brighter green.
     const curvedKeys=new Set((F.curveIds||[]).map(e=>[...e].sort((a,b)=>a-b).join(":")));
+    const _edgeColor = S.symPreviewing ? 0xff3355 : 0xa8ffc2;
+    const _curveColor = S.symPreviewing ? 0xff3355 : 0x39ff88;
     const straight=[];
     for(const face of (F.faceIndices||[])) for(let i=0;i<face.length;i++){
       const a=face[i], b=face[(i+1)%face.length];
@@ -890,13 +896,13 @@ function refreshSelHL(){
     if(straight.length){
       const g=new THREE.BufferGeometry();
       g.setAttribute("position",new THREE.Float32BufferAttribute(straight,3));
-      const o=new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0xa8ffc2}));
+      const o=new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:_edgeColor}));
       o.userData.hl=true; o.visible=onEd; projGroup.add(o);
     }
     for(const L of (F.curves||[])){
       const g = new THREE.BufferGeometry();
       g.setAttribute("position", new THREE.Float32BufferAttribute(L.flat(),3));
-      const o = new THREE.Line(g, new THREE.LineBasicMaterial({color:0x39ff88}));
+      const o = new THREE.Line(g, new THREE.LineBasicMaterial({color:_curveColor}));
       o.userData.hl = true; o.visible=onEd; projGroup.add(o);
     }
     if(F.bands && F.bands.length){
@@ -1598,6 +1604,7 @@ $("expbtn").onclick=async()=>{
     const {so,fl}=overLists();
     const body={x:S.splits.x, y:S.splits.y, z:S.splits.z, solid:so, fluid:fl};
     if(S.pins) body.pins=S.pins;
+    if(S.gradeOverrides && Object.keys(S.gradeOverrides).length) body.grade_overrides=S.gradeOverrides;
     const r=await api("/api/export",{method:"POST",
       headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
     if(r.ok===false) throw new Error(tailMsg(r.log,2)||"exporter failed");
@@ -2340,6 +2347,149 @@ async function updateProjection(){
   }finally{btn.disabled=false;btn.classList.remove("busy");btn.textContent=old;}
 }
 $("updproj").onclick=()=>updateProjection();
+/* ---- make the mesh symmetric about the z=0 plane ---- */
+async function makeSymmetrical(){
+  const btn=$("sympbtn");
+  // If a preview is already active, this button acts as "Save".
+  if(S.symPreview){
+    if(btn) btn.disabled=true;
+    try{
+      const {moves} = S.symPreview;
+      const states=Object.keys(moves).map(vid=>({vid:Number(vid), pos:moves[vid], pinned:false}));
+      const r=await api("/api/setvertices",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({states})});
+      if(r&&r.ok===false) throw new Error(r.error||"server refused");
+      const g=await api("/api/read_dict");
+      if(g&&g.pins&&typeof g.pins==="object") S.pins=g.pins;
+      S.projDirty=true;
+      const afterStates=Object.keys(moves).map(vid=>({vid:Number(vid), pos:[...moves[vid]], pinned:false}));
+      histPush({kind:"vertex", label:"make symmetrical", before:S.symPreview.before, after:afterStates, sig:JSON.stringify(S.dictGrid||null)});
+      // cleanup preview
+      if(S.symPreview && S.symPreview.oldGroup && S.symPreview.oldGroup.parent) S.symPreview.oldGroup.parent.remove(S.symPreview.oldGroup);
+      S.symPreviewing=false;
+      S.symPreview=null;
+      refreshSelHL();
+      if(btn){ btn.textContent="Make symmetrical"; btn.disabled=false; }
+      const rb=$("symprevbtn"); if(rb) rb.style.display="none";
+      const msg=`symmetrised: ${Object.keys(moves).length} vertices saved — run Update projection to snap to surface`;
+      setStat(msg); log(msg);
+    }catch(e){
+      setStat("make symmetrical failed: "+(e&&e.message?e.message:String(e))); log("make symmetrical: "+e);
+      console.error(e);
+      if(btn) btn.disabled=false;
+    }
+    return;
+  }
+  // Otherwise: compute + preview (non-blocking, red edges).
+  if(btn) btn.disabled=true;
+  try{
+    if(!S.dictVerts || !S.dictVerts.length){ await loadDictSurface(); }
+    if(!S.dictGrid || !S.dictGrid.z || !S.dictGrid.z.length){
+      const w=await api("/api/dictwall"); S.dictVerts=w.verts||S.dictVerts; S.dictGrid={x:w.x||[],y:w.y||[],z:w.z||[]};
+    }
+    const verts=S.dictVerts, G=S.dictGrid;
+    const nx=G.x.length-1, ny=G.y.length-1, nz=G.z.length-1;
+    if(nx<1||ny<1||nz<1){ setStat("make symmetrical: no grid"); if(btn) btn.disabled=false; return; }
+    const stride=(nx+1)*(ny+1);
+    const pairs=[];
+    const seen=new Set();
+    for(let vid=0; vid<verts.length; vid++){
+      if(!verts[vid]) continue;
+      const i=vid%(nx+1), j=Math.floor(vid/(nx+1))%(ny+1), k=Math.floor(vid/stride);
+      const km=nz-k;
+      if(km===k) continue;
+      if(km<0||km>nz) continue;
+      const vid2=i+(nx+1)*j+stride*km;
+      if(vid2<0||vid2>=verts.length||!verts[vid2]) continue;
+      const key=vid<vid2?vid+":"+vid2:vid2+":"+vid;
+      if(seen.has(key)) continue;
+      seen.add(key);
+      pairs.push([vid,vid2]);
+    }
+    if(!pairs.length){ setStat("make symmetrical: no vertex couples found"); log("make symmetrical: no couples"); if(btn) btn.disabled=false; return; }
+    const prevVerts = verts.map(v=>v?[...v]:v);
+    const moves={};
+    const before=[];
+    for(const [a,b] of pairs){
+      // z-negative point copies (x,y) from the z-positive point; z stays as-is
+      let pos, neg;
+      if(verts[a][2] > 0 && verts[b][2] < 0){ pos=a; neg=b; }
+      else if(verts[b][2] > 0 && verts[a][2] < 0){ pos=b; neg=a; }
+      else continue;
+      const pp=verts[pos], pn=verts[neg];
+      // average (x,y) and average |z|, then reapply sign -> true mirror
+      const xa=(pp[0]+pn[0])/2, ya=(pp[1]+pn[1])/2;
+      const za=(Math.abs(pp[2])+Math.abs(pn[2]))/2;
+      if(Math.abs(pp[0]-xa)>1e-12 || Math.abs(pp[1]-ya)>1e-12 ||
+         Math.abs(pn[0]-xa)>1e-12 || Math.abs(pn[1]-ya)>1e-12 ||
+         Math.abs(pp[2]-za)>1e-12 || Math.abs(pn[2]+za)>1e-12){
+        moves[pos]=[xa, ya, za];
+        moves[neg]=[xa, ya, -za];
+        before.push({vid:pos, pos:[pp[0],pp[1],pp[2]], pinned:!!(S.pins&&S.pins[pinKey(pos)])});
+        before.push({vid:neg, pos:[pn[0],pn[1],pn[2]], pinned:!!(S.pins&&S.pins[pinKey(neg)])});
+      }
+    }
+    if(!Object.keys(moves).length){ setStat("make symmetrical: already symmetric"); log("make symmetrical: already symmetric"); if(btn) btn.disabled=false; return; }
+    // preview: mutate in memory + show edges in red
+    for(const vid in moves){ const v=Number(vid); if(verts[v]) verts[v]=[...moves[vid]]; }
+    S.symPreviewing = true;
+    S.symPreview = {moves, prevVerts, before};
+    refreshSelHL();
+    // draw the ORIGINAL (pre-move) edges in green alongside the red new ones
+    const _oldGroup = new THREE.Group();
+    _oldGroup.userData.symOld = true;
+    const F0 = S.faceProj;
+    if(F0){
+      const curvedKeys0=new Set((F0.curveIds||[]).map(e=>[...e].sort((a,b)=>a-b).join(":")));
+      const straight0=[];
+      for(const face of (F0.faceIndices||[])) for(let i=0;i<face.length;i++){
+        const a=face[i], b=face[(i+1)%face.length];
+        if(curvedKeys0.has([a,b].sort((x,y)=>x-y).join(":"))) continue;
+        const pa=prevVerts[a], pb=prevVerts[b];
+        if(pa&&pb) straight0.push(...pa,...pb);
+      }
+      if(straight0.length){
+        const g=new THREE.BufferGeometry();
+        g.setAttribute("position",new THREE.Float32BufferAttribute(straight0,3));
+        const o=new THREE.LineSegments(g,new THREE.LineBasicMaterial({color:0x39ff88, opacity:0.5, transparent:true}));
+        o.userData.symOld=true; _oldGroup.add(o);
+      }
+      for(const L of (F0.curves||[])){
+        // rebuild curve from prevVerts using curveIds is complex; skip (straight edges suffice)
+      }
+    }
+    projGroup.add(_oldGroup);
+    S.symPreview.oldGroup = _oldGroup;
+    // switch button to "Save"
+    if(btn){ btn.textContent="SAVE"; btn.disabled=false; }
+    const rb=$("symprevbtn"); if(rb) rb.style.display="";
+    setStat(`${Object.keys(moves).length} vertices moved (preview, red edges). Both sides averaged to a common (x,y,|z|). Inspect, then Save or Revert.`);
+    log(`make symmetrical: preview ${Object.keys(moves).length} vertices (edges shown in red). Save or Revert.`);
+  }catch(e){
+    if(S.symPreview && S.symPreview.oldGroup && S.symPreview.oldGroup.parent) S.symPreview.oldGroup.parent.remove(S.symPreview.oldGroup);
+    S.symPreviewing = false;
+    if(S.symPreview){ S.dictVerts = S.symPreview.prevVerts; S.symPreview=null; refreshSelHL(); }
+    setStat("make symmetrical failed: "+(e&&e.message?e.message:String(e))); log("make symmetrical: "+e);
+    console.error(e);
+    const btn2=$("sympbtn"); if(btn2){ btn2.textContent="Make symmetrical"; btn2.disabled=false; }
+    const rb=$("symprevbtn"); if(rb) rb.style.display="none";
+  }
+}
+function revertSymmetrical(){
+  const p=S.symPreview; if(!p) return;
+  if(p.oldGroup && p.oldGroup.parent) p.oldGroup.parent.remove(p.oldGroup);
+  S.dictVerts = p.prevVerts;
+  S.symPreviewing = false;
+  S.symPreview = null;
+  refreshSelHL();
+  const btn=$("sympbtn"); if(btn){ btn.textContent="Make symmetrical"; btn.disabled=false; }
+  const rb=$("symprevbtn"); if(rb) rb.style.display="none";
+  setStat("make symmetrical: reverted"); log("make symmetrical: reverted");
+}
+$("sympbtn").onclick=()=>makeSymmetrical();
+$("symprevbtn").onclick=()=>revertSymmetrical();
+$("sympbtn").onclick=()=>makeSymmetrical();
+$("symprevbtn").onclick=()=>revertSymmetrical();
+$("sympbtn").onclick=()=>makeSymmetrical();
 /* ---- vertex-move recorder: each slide / snap / Undo projection / Update projection is
    stored as the before/after state (position + pinned) of the vertices it changed. ---- */
 function _surfaceIdList(){
@@ -2380,24 +2530,44 @@ function renderGradeSummary(rep){
     m.textContent=rep&&rep.error?"not graded: "+rep.error:"no grading yet - press Write";
     el.appendChild(m); return;
   }
-  const rows=rep.rows||[], fmt=v=>String(+Number(v).toPrecision(4));
+  const rows=rep.rows||[], fmt=v=>{let s=Number(v).toPrecision(4); if(s.includes("e")) return s; if(s.includes(".")){ s=s.replace(/0+$/,""); if(s.endsWith(".")) s+="0"; } else { s+=".0"; } return s;};
+  // header
+  const hdr=document.createElement("div"); hdr.className="mut";
+  hdr.style.cssText="grid-column:1 / -1; display:flex; gap:6px; font-size:10.5px; color:var(--dim); margin-bottom:2px;";
+  hdr.innerHTML="<span style='width:34px'>region</span><span style='flex:1'>calc</span><span>override</span>";
+  el.appendChild(hdr);
   for(const [lab,ax,side] of GRADE_REGIONS){
     const rs=rows.filter(r=>r.axis===ax&&r.side===side);
-    // outermost slab of that side: highest index on the max side, lowest on the min side
     const r=rs.length?rs.reduce((p,q)=>side==="high"?(q.slab>p.slab?q:p):(q.slab<p.slab?q:p)):null;
     const cell=document.createElement("div"); cell.className="mut";
+    cell.style.cssText="display:flex; align-items:center; gap:6px;";
     const l=document.createElement("span"); l.style.cssText="display:inline-block;width:34px"; l.textContent=lab;
-    const v=document.createElement("b"); v.style.color="var(--txt)";
+    const v=document.createElement("b");
+    const ovVal = (S.gradeOverrides||{})[lab];
+    const overridden = ovVal!==undefined && ovVal!==null && String(ovVal).trim()!=="";
+    v.style.color = "var(--txt)";
     if(r){
       const clamped=/clamp/.test(r.note||"");
-      v.textContent=fmt(r.new_g)+(clamped?"*":"");
+      v.textContent=fmt(overridden?ovVal:r.new_g)+(clamped&&!overridden?"*":"");
       cell.title=`${lab}: slab ${r.slab}, ${r.n} cells, growth ${Number(r.growth).toFixed(3)}x per cell, `+
         `first cell / inner cell ${Number(r.mismatch_min).toFixed(2)}-${Number(r.mismatch_max).toFixed(2)}x`+(r.note?" ("+r.note+")":"");
     }else{
-      v.textContent="-";
+      v.textContent=overridden?fmt(ovVal):"-";
       cell.title=`${lab}: no outer slab to grade on this side`;
     }
-    cell.appendChild(l); cell.appendChild(v); el.appendChild(cell);
+    const inp=document.createElement("input");
+    inp.type="text"; inp.className="ovr"; inp.dataset.region=lab;
+    inp.value = overridden ? String(ovVal) : "";
+    inp.placeholder="—";
+    inp.style.cssText="width:52px; padding:2px 4px; font-size:11px; color:"+(overridden?"#ff6b6b":"var(--txt)")+";";
+    inp.oninput=()=>{
+      const val=inp.value.trim();
+      if(val===""){ delete (S.gradeOverrides||{})[lab]; }
+      else { if(!S.gradeOverrides) S.gradeOverrides={}; S.gradeOverrides[lab]=val; }
+      const isOv = val!=="";
+      inp.style.color = isOv ? "#ff6b6b" : "var(--txt)";
+    };
+    cell.appendChild(l); cell.appendChild(v); cell.appendChild(inp); el.appendChild(cell);
   }
 }
 async function loadGradeSummary(){
@@ -2624,6 +2794,7 @@ $("sldcbtn").onclick=()=>setVertexTool("slide");
       for(const t of (savedGrid.solid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=1;
       for(const t of (savedGrid.fluid||[])) if(Array.isArray(t)&&t.length===3) S.over[t.join(",")]=0;
       if(savedGrid.pins && typeof savedGrid.pins==="object") S.pins = savedGrid.pins;
+    if(savedGrid.grade_overrides && typeof savedGrid.grade_overrides==="object") S.gradeOverrides = savedGrid.grade_overrides;
     } else {
       S.splits = tables.tuned || S.splits;
     }
