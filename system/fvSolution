@@ -32,7 +32,7 @@ solvers
         smoother        GaussSeidel;
     }
 
-    U
+    "(U|k|epsilon)"
     {
         solver          smoothSolver;
         smoother        symGaussSeidel;
@@ -53,8 +53,10 @@ relaxationFactors
     {
         U               0.7;
         p               0.3;
+        k               0.7;
+        epsilon         0.7;
     }
 }
 
-
 // ************************************************************************* //
+
