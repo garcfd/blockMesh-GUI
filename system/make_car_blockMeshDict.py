@@ -1199,7 +1199,24 @@ _orthogonalize_outer_boundaries()
 print("outer boundaries orthogonalized (top, sides, inlet, outlet)", file=sys.stderr)
 
 # ------------------------------------------------- outer block grading calculation
+# SINGLE SOURCE OF TRUTH for the grading of the outer (live) slabs. server.py and
+# the GUI no longer grade anything; they only report system/grading_report.json.
+#
+# Block grading: ONE simpleGrading value per slab, shared by every block of the slab,
+# so blockMesh face merging stays valid. Every slab outside the solid (car) block range
+# of an axis is graded outward from the car so that its first cell matches the last
+# cell of the slab inside it (slabs are chained outward).
+#
+# The grid is draped over the car and the outer planes are orthogonalized above, so the
+# real height of a slab differs from column to column (up to ~2.5x cell-size error if
+# the nominal split coordinates were used). The calculation therefore uses the ACTUAL
+# snapped edge lengths of the slab, and since one value cannot match every column, the
+# growth ratio is the least-squares fit of log(first cell / inner cell) over all the
+# slab's columns. The remaining mismatch is reported (worst_mismatch).
+import math as _math
+
 def _slab_cell_sizes(L, n, g):
+    """(first, last) cell size of a slab of length L, n cells, ratio g = last/first."""
     if n <= 1 or abs(g - 1.0) < 1e-9:
         d = L / max(n, 1)
         return d, d
@@ -1210,106 +1227,150 @@ def _slab_cell_sizes(L, n, g):
     d0 = L * (t - 1.0) / (t ** n - 1.0)
     return d0, d0 * (t ** (n - 1))
 
+def _first_cell(L, n, t):
+    """First cell of an n-cell slab of length L with per-cell growth t."""
+    if n <= 1 or abs(t - 1.0) < 1e-12:
+        return L / max(n, 1)
+    return L * (t - 1.0) / (t ** n - 1.0)
+
 def _solve_growth_ratio(L, n, d):
+    """Per-cell growth t with d*(1 + t + ... + t^(n-1)) = L (t < 1: cells shrink)."""
     if n <= 1 or d <= 0 or L <= 0:
         return 1.0
-    avg = L / float(n)
-    if abs(avg - d) < 1e-9:
-        return 1.0
     target = L / d
-    if target < n:
-        lo, hi = 0.01, 1.0
-    else:
-        lo, hi = 1.0, 50.0
-    for _ in range(60):
+    if abs(target - n) < 1e-9 * n:
+        return 1.0
+    t_cap = min(50.0, 10.0 ** (250.0 / n))        # keeps t**n inside float range
+    lo, hi = (1.0 / t_cap, 1.0) if target < n else (1.0, t_cap)
+    for _ in range(80):
         mid = 0.5 * (lo + hi)
-        if abs(mid - 1.0) < 1e-9:
-            val = float(n)
-        else:
-            val = (mid ** n - 1.0) / (mid - 1.0)
+        val = float(n) if abs(mid - 1.0) < 1e-12 else (mid ** n - 1.0) / (mid - 1.0)
         if val < target:
             lo = mid
         else:
             hi = mid
     return 0.5 * (lo + hi)
 
-# Precalculate adjacent inner slab cell sizes
-_d_adj_inlet = None
-if len(x_lines) > 2 and x_lines[2][1] > 0:
-    _L = xs[2] - xs[1]
-    _d_adj_inlet, _ = _slab_cell_sizes(_L, x_lines[2][1], x_lines[2][2])
+def _fit_growth(cols, n):
+    """cols = [(L, d)] per column. Growth t minimising sum(log(first(L,n,t)/d)^2)."""
+    ts = [_solve_growth_ratio(L, n, d) for L, d in cols]
+    t_lo, t_hi = min(ts), max(ts)
+    if t_hi / t_lo < 1.0 + 1e-9:
+        return 0.5 * (t_lo + t_hi)
 
-_d_adj_outlet = None
-if len(x_lines) > 2 and x_lines[-2][1] > 0:
-    _L = xs[-2] - xs[-3]
-    _, _d_adj_outlet = _slab_cell_sizes(_L, x_lines[-2][1], x_lines[-2][2])
+    def cost(lt):
+        t = _math.exp(lt)
+        return sum(_math.log(_first_cell(L, n, t) / d) ** 2 for L, d in cols)
+    a, b = _math.log(t_lo), _math.log(t_hi)
+    gr = 0.5 * (_math.sqrt(5.0) - 1.0)            # golden-section search
+    c, e = b - gr * (b - a), a + gr * (b - a)
+    fc, fe = cost(c), cost(e)
+    for _ in range(60):
+        if fc < fe:
+            b, e, fe = e, c, fc
+            c = b - gr * (b - a)
+            fc = cost(c)
+        else:
+            a, c, fc = c, e, fe
+            e = a + gr * (b - a)
+            fe = cost(e)
+    return _math.exp(0.5 * (a + b))
 
-_d_adj_top = None
-if len(y_lines) > 2 and y_lines[-2][1] > 0:
-    _L = ys[-2] - ys[-3]
-    _, _d_adj_top = _slab_cell_sizes(_L, y_lines[-2][1], y_lines[-2][2])
+def _vid_on(a, s, p, q):
+    """Vertex at index s along axis a; (p, q) = indices along the other two axes."""
+    if a == 0:
+        return vid(s, p, q)
+    if a == 1:
+        return vid(p, s, q)
+    return vid(p, q, s)
 
-_d_adj_side_lo = None
-if len(z_lines) > 2 and z_lines[2][1] > 0:
-    _L = zs[2] - zs[1]
-    _d_adj_side_lo, _ = _slab_cell_sizes(_L, z_lines[2][1], z_lines[2][2])
+def _edge_len(a, s, p, q):
+    return float(np.linalg.norm(np.asarray(snapped[_vid_on(a, s + 1, p, q)], dtype=float)
+                                - np.asarray(snapped[_vid_on(a, s, p, q)], dtype=float)))
 
-_d_adj_side_hi = None
-if len(z_lines) > 2 and z_lines[-2][1] > 0:
-    _L = zs[-2] - zs[-3]
-    _, _d_adj_side_hi = _slab_cell_sizes(_L, z_lines[-2][1], z_lines[-2][2])
-
-# Slab-consistent outer block gradings (required by OpenFOAM multi-block face merging)
-_gy_top_slab = None
-if len(y_lines) > 2 and _d_adj_top is not None and y_lines[-1][1] >= 2:
-    _Ly_slab = ys[-1] - ys[-2]
-    _t = _solve_growth_ratio(_Ly_slab, y_lines[-1][1], _d_adj_top)
-    _gy_top_slab = min(max(_t ** (y_lines[-1][1] - 1), 0.01), 100.0)
-
-_gz_side_lo_slab = None
-if len(z_lines) > 2 and _d_adj_side_lo is not None and z_lines[1][1] >= 2:
-    _Lz_slab = zs[1] - zs[0]
-    _t = _solve_growth_ratio(_Lz_slab, z_lines[1][1], _d_adj_side_lo)
-    _gz_side_lo_slab = min(max(_t ** (-(z_lines[1][1] - 1)), 0.01), 100.0)
-
-_gz_side_hi_slab = None
-if len(z_lines) > 2 and _d_adj_side_hi is not None and z_lines[-1][1] >= 2:
-    _Lz_slab = zs[-1] - zs[-2]
-    _t = _solve_growth_ratio(_Lz_slab, z_lines[-1][1], _d_adj_side_hi)
-    _gz_side_hi_slab = min(max(_t ** (z_lines[-1][1] - 1), 0.01), 100.0)
-
-_gx_inlet_slab = None
-if len(x_lines) > 2 and _d_adj_inlet is not None and x_lines[1][1] >= 2:
-    _Lx_slab = xs[1] - xs[0]
-    _t = _solve_growth_ratio(_Lx_slab, x_lines[1][1], _d_adj_inlet)
-    _gx_inlet_slab = min(max(_t ** (-(x_lines[1][1] - 1)), 0.01), 100.0)
-
-_gx_outlet_slab = None
-if len(x_lines) > 2 and _d_adj_outlet is not None and x_lines[-1][1] >= 2:
-    _Lx_slab = xs[-1] - xs[-2]
-    _t = _solve_growth_ratio(_Lx_slab, x_lines[-1][1], _d_adj_outlet)
-    _gx_outlet_slab = min(max(_t ** (x_lines[-1][1] - 1), 0.01), 100.0)
+_GRADE = {}        # (axis, slab) -> simpleGrading ratio of that outer slab
+_G_ROWS = []
+_G_REPORT = None
+_sol_idx = np.argwhere(solid)
+if len(_sol_idx) == 0:
+    _G_REPORT = {"error": "no dead (solid) blocks found - nothing to match the outer blocks to"}
+    print("outer block grading skipped: " + _G_REPORT["error"], file=sys.stderr)
+else:
+    _LINES = (x_lines, y_lines, z_lines)
+    _NN = (nx, ny, nz)
+    for _a in range(3):
+        _ln, _na = _LINES[_a], _NN[_a]
+        _lo = int(_sol_idx[:, _a].min())
+        _hi = int(_sol_idx[:, _a].max())
+        _oa, _ob = [m for m in range(3) if m != _a]
+        _cols = [(p, q) for p in range(_NN[_oa] + 1) for q in range(_NN[_ob] + 1)]
+        for _side in ("high", "low"):
+            _high = (_side == "high")
+            _order = list(range(_hi + 1, _na)) if _high else list(range(_lo - 1, -1, -1))
+            if not _order:
+                continue
+            _ref = _hi if _high else _lo
+            # cell size on the plane shared with the next slab towards the car, per column
+            _dcol = []
+            for p, q in _cols:
+                f0, l0 = _slab_cell_sizes(_edge_len(_a, _ref, p, q), _ln[_ref + 1][1], _ln[_ref + 1][2])
+                _dcol.append(l0 if _high else f0)
+            for _s in _order:
+                _n, _old_g = _ln[_s + 1][1], _ln[_s + 1][2]
+                _Ls = [_edge_len(_a, _s, p, q) for p, q in _cols]
+                _pairs = [(L, d) for L, d in zip(_Ls, _dcol) if L > 1e-9 and d > 1e-12]
+                _note, _t, _g = "", 1.0, 1.0
+                if _n < 2:
+                    _note = "single cell"
+                elif not _pairs:
+                    _note = "no usable columns - left as is"
+                    _g = _old_g
+                else:
+                    _t = _fit_growth(_pairs, _n)
+                    _g = _t ** (_n - 1) if _high else _t ** (-(_n - 1))
+                    if _g > 100.0 or _g < 0.01:
+                        _g = min(max(_g, 0.01), 100.0)
+                        _note = "grading clamped to 100"
+                _ratio, _newd = [], []
+                for L, d in zip(_Ls, _dcol):
+                    f1, l1 = _slab_cell_sizes(L, _n, _g)
+                    near, far = (f1, l1) if _high else (l1, f1)
+                    if d > 1e-12 and near > 0:
+                        _ratio.append(near / d)
+                    _newd.append(far)
+                _dcol = _newd
+                _GRADE[(_a, _s)] = _g
+                _rmin, _rmax = (min(_ratio), max(_ratio)) if _ratio else (1.0, 1.0)
+                _G_ROWS.append({"axis": "xyz"[_a], "slab": _s, "side": _side,
+                                "c0": _ln[_s][0], "c1": _ln[_s + 1][0], "n": _n,
+                                "old_g": _old_g, "new_g": _g, "growth": _t,
+                                "mismatch_min": _rmin, "mismatch_max": _rmax,
+                                "note": _note})
+    _worst = max([max(r["mismatch_max"], 1.0 / r["mismatch_min"]) for r in _G_ROWS] or [1.0])
+    _G_REPORT = {"slabs": len(_G_ROWS),
+                 "changed": sum(1 for r in _G_ROWS if abs(r["new_g"] - r["old_g"]) > 1e-9),
+                 "max_growth": max([max(r["growth"], 1.0 / r["growth"]) for r in _G_ROWS] or [1.0]),
+                 "worst_mismatch": _worst,
+                 "dead_blocks": int(solid.sum()),
+                 "rows": _G_ROWS}
+    print("outer blocks graded from actual slab lengths: %d slabs, worst first-cell mismatch %.2fx"
+          % (len(_G_ROWS), _worst), file=sys.stderr)
+try:
+    with open(os.path.join(CASE, "system", "grading_report.json"), "w") as _gf:
+        json.dump(_G_REPORT, _gf)
+except OSError as _e:
+    print("grading_report.json not written (%s)" % _e, file=sys.stderr)
 
 _new_blocks = []
 for _b_idx, (_hv, _nc, _g) in enumerate(blocks):
-    _i, _j, _k = block_ijk[_b_idx]
-    _gx, _gy, _gz = _g
-
-    if _j == ny - 1 and _gy_top_slab is not None:
-        _gy = _gy_top_slab
-    if _k == 0 and _gz_side_lo_slab is not None:
-        _gz = _gz_side_lo_slab
-    elif _k == nz - 1 and _gz_side_hi_slab is not None:
-        _gz = _gz_side_hi_slab
-    if _i == 0 and _gx_inlet_slab is not None:
-        _gx = _gx_inlet_slab
-    elif _i == nx - 1 and _gx_outlet_slab is not None:
-        _gx = _gx_outlet_slab
-
-    _new_blocks.append((_hv, _nc, (_gx, _gy, _gz)))
-
+    _ijk = block_ijk[_b_idx]
+    _gn = list(_g)
+    for _a in range(3):
+        _gv = _GRADE.get((_a, _ijk[_a]))
+        if _gv is not None:
+            _gn[_a] = _gv
+    _new_blocks.append((_hv, _nc, tuple(_gn)))
 blocks = _new_blocks
-print("outer blocks grading calculated based on orthogonalized slab lengths", file=sys.stderr)
 
 # ------------------------------------------------- FULL edge projection
 # Every wall edge gets a polyLine whose intermediates are projected onto the
