@@ -2275,6 +2275,13 @@ function pickVertex(ev){
   const fp=rayFallbackPoint(ev);
   return fp ? nearestVertexTo(fp) : null;
 }
+/* ymin plane lock: a vertex on the ymin boundary keeps y = ymin (x,z may slide) */
+function clampYmin(vid,p){
+  const g=S.dictGrid;
+  if(!g||!g.x||!g.y||!Number.isInteger(vid)||!p) return p;
+  const nx=g.x.length-1, ny=g.y.length-1;
+  return (Math.floor(vid/(nx+1))%(ny+1)===0) ? [p[0],g.y[0],p[2]] : p;
+}
 /* ---- dict-grid id -> "x|y|z" pin key ---- */
 function pinKey(vid){
   const g=S.dictGrid;
@@ -2323,7 +2330,7 @@ async function updateProjection(){
     for(let n=0;n<ids.length;n++){
       const id=ids[n], i=id%(nx+1), j=Math.floor(id/(nx+1))%(ny+1), k=Math.floor(id/((nx+1)*(ny+1)));
       if(xs[i]===undefined||ys[j]===undefined||zs[k]===undefined) continue;
-      pins[`${xs[i]}|${ys[j]}|${zs[k]}`]=projected.points[n];
+      pins[`${xs[i]}|${ys[j]}|${zs[k]}`]=(j===0)?[projected.points[n][0],ys[0],projected.points[n][2]]:projected.points[n];
     }
     setStat("writing projected vertices to blockMeshDict…");
     const saved=await api("/api/pinpatch",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pins})});
@@ -2597,7 +2604,7 @@ async function _applyVertexPin(pos, msg){
   const _vtok=vhBegin();
   const prevPin=S.pins[k]?[...S.pins[k]]:null;
   const prevPos=S.dictVerts[vid]?[...S.dictVerts[vid]]:null;
-  S.pins[k]=[pos[0],pos[1],pos[2]];
+  S.pins[k]=clampYmin(vid,[pos[0],pos[1],pos[2]]);
   if(S.dictVerts[vid]) S.dictVerts[vid]=S.pins[k];
   showX("w",S.pins[k]);
   showX("g",S.pins[k], "slide");

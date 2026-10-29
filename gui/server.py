@@ -949,6 +949,23 @@ def _on_boundary(vi, d):
         return False
 
 
+def _on_ymin(vi, d):
+    """True if vertex id lies on the ymin boundary plane (j == 0)."""
+    try:
+        nx, ny = len(d["x"]) - 1, len(d["y"]) - 1
+        return vi is not None and (vi // (nx + 1)) % (ny + 1) == 0
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _clamp_ymin(vi, d, p):
+    """p with y forced to ymin when vertex vi is on the ymin plane."""
+    p = [float(c) for c in p]
+    if _on_ymin(vi, d):
+        p[1] = float(d["y"][0])
+    return p
+
+
 def _dead_verts():
     """Vertex ids on any dead (solid) block, reconstructed from the current
     dict's live blocks plus the full grid. Returns None if unreadable."""
@@ -1015,7 +1032,7 @@ def _veto_boundary_pins(pins, d, dead=None):
             continue
         if _pin_vetoed(_key_to_vid(_k, d)[0], d, dead):
             continue
-        out[_k] = _p
+        out[_k] = _clamp_ymin(_key_to_vid(_k, d)[0], d, _p)
     return out
 
 
@@ -1567,6 +1584,7 @@ def _write_vertices(moves, unpin=()):
     txt = open(dp).read()
     m = re.search(r"vertices\s*\(\s*(.*?)\)\s*;\s*blocks", txt, re.S)
     vlines = re.findall(r"\(([^()]+)\)", m.group(1))
+    moves = {v: _clamp_ymin(v, gd, p) for v, p in moves.items()}
     for vid, p in moves.items():
         if 0 <= vid < len(vlines):
             vlines[vid] = "%.6g %.6g %.6g" % tuple(float(c) for c in p)
@@ -1648,6 +1666,17 @@ def _problem_points(r):
     return out
 
 
+def _clamp_rows(ids, P):
+    """Force y = ymin for rows of P whose vertex id is on the ymin plane."""
+    gd = _dict_grid()
+    if gd is None:
+        return P
+    for n, v in enumerate(ids):
+        if _on_ymin(int(v), gd):
+            P[n][1] = float(gd["y"][0])
+    return P
+
+
 def _propose(verts, ids, nbr, relax, target):
     """Laplacian step toward the neighbour mean, then back onto the surface."""
     import numpy as np
@@ -1659,6 +1688,7 @@ def _propose(verts, ids, nbr, relax, target):
         lv[n] = np.linalg.norm(nb - P[n], axis=1).mean()
         new[n] = P[n] + relax * (nb.mean(axis=0) - P[n])
     snapped, _ = snap_points(new, target)
+    snapped = _clamp_rows(ids, snapped)
     step = snapped - P
     d = np.linalg.norm(step, axis=1)
     cap = 0.5 * lv                              # never move more than half an edge
@@ -1666,6 +1696,7 @@ def _propose(verts, ids, nbr, relax, target):
     if over.any():
         clipped = P[over] + step[over] * (cap[over] / np.maximum(d[over], 1e-12))[:, None]
         snapped[over], _ = snap_points(clipped, target)
+        snapped = _clamp_rows(ids, snapped)
     return snapped, np.linalg.norm(snapped - P, axis=1)
 
 
@@ -1876,6 +1907,8 @@ def _refresh_interface_edges(changed=None, missing_only=False):
         for a, b, k in layout:
             pts = Q[pos:pos + k].copy()
             pos += k
+            if gd is not None and _on_ymin(a, gd) and _on_ymin(b, gd):
+                pts[:, 1] = float(gd["y"][0])      # ymin-plane edge stays flat
             if a in fixedv and b in fixedv:        # edge on the outer boundary:
                 for ax in range(3):                # stay in that boundary plane
                     if abs(verts[a][ax] - verts[b][ax]) < 1e-9:
@@ -2650,6 +2683,7 @@ class H(BaseHTTPRequestHandler):
                     if _pin_vetoed(_vi, _gd, _dead):
                         _vetoed.append(str(_k))
                         continue
+                    _p = _clamp_ymin(_vi, _gd, _p)
                     _clean[str(_vi)] = _p
             except (TypeError, ValueError, KeyError, OSError):
                 return self._json({"error": "vertex projections {key:[x,y,z]} required"}, 400)
@@ -2728,6 +2762,8 @@ class H(BaseHTTPRequestHandler):
                            for _k, _v in _pins.items()
                            if isinstance(_v, (list, tuple)) and len(_v) == 3
                            and not _pin_vetoed(_key_to_vid(_k, cur)[0], cur, _dead)}
+            for _k in list(cur["pins"]):
+                cur["pins"][_k] = _clamp_ymin(_key_to_vid(_k, cur)[0], cur, cur["pins"][_k])
             with open(_p, "w") as f:
                 json.dump(cur, f)
             return self._json({"ok": True, "n": len(cur["pins"])})
