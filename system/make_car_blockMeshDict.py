@@ -862,6 +862,19 @@ try:
 except Exception as _e:
     print(f"freeze.json ignored ({_e})", file=sys.stderr)
 
+# ------------------------------------------------- ymin (ground) plane lock
+# Every vertex on the ymin boundary plane (j == 0) must stay ON that plane,
+# whatever pins / SDF projection / snapping did to it. In-plane (x, z) motion
+# is still allowed (wheel contact patch), only y is forced to ys[0].
+_ymin_v = {vid(_i, 0, _k) for _k in range(nz + 1) for _i in range(nx + 1)}
+def _enforce_ymin():
+    _n = 0
+    for _v in _ymin_v:
+        if abs(float(snapped[_v][1]) - float(ys[0])) > 1e-12:
+            snapped[_v][1] = float(ys[0])
+            _n += 1
+    return _n
+
 # ------------------------------------------------- hand-placed pins
 # User-dragged vertexes (splits.json {"pins": {"x|y|z": [x,y,z]}}): grid coords
 # resolve to vertex ids here, so splits edits elsewhere can't orphan them.
@@ -1056,6 +1069,8 @@ for _v in sorted(set(_pin_rev),
         continue
     _save = snapped[_v].copy()
     snapped[_v] = np.asarray(_PINS[_v], dtype=float)
+    if _v in _ymin_v:
+        snapped[_v][1] = float(ys[0])
     _ok = True
     for _b, _nc, _g in blocks:
         if _v in _b:
@@ -1083,6 +1098,8 @@ for _v, _pp in _PINS.items():
     _accepted = False
     for _alpha in (1.0, 0.75, 0.5, 0.25):
         snapped[_v] = _raw + _alpha * (_target - _raw)
+        if _v in _ymin_v:
+            snapped[_v][1] = float(ys[0])
         _valid = True
         for _b, _nc, _g in blocks:
             if _v in _b and (not _block_faces_ok(_b) or hex_volume(snapped[np.array(_b)]) <= 0):
@@ -1120,6 +1137,8 @@ for _v in _wall_vertices:
     _accepted = False
     for _alpha in (1.0, 0.75, 0.5, 0.25):
         snapped[_v] = _start + _alpha * (_target - _start)
+        if _v in _ymin_v:
+            snapped[_v][1] = float(ys[0])
         _valid = True
         for _b, _nc, _g in blocks:
             if _v in _b and (not _block_faces_ok(_b) or hex_volume(snapped[np.array(_b)]) <= 0):
@@ -1202,6 +1221,8 @@ def _orthogonalize_outer_boundaries():
 
 _orthogonalize_outer_boundaries()
 print("outer boundaries orthogonalized (top, sides, inlet, outlet)", file=sys.stderr)
+_n_ymin = _enforce_ymin()
+print(f"ymin plane lock: {_n_ymin} vertices put back on y={ys[0]}", file=sys.stderr)
 
 # ------------------------------------------------- outer block grading calculation
 # SINGLE SOURCE OF TRUTH for the grading of the outer (live) slabs. server.py and
@@ -1293,6 +1314,32 @@ def _edge_len(a, s, p, q):
     return float(np.linalg.norm(np.asarray(snapped[_vid_on(a, s + 1, p, q)], dtype=float)
                                 - np.asarray(snapped[_vid_on(a, s, p, q)], dtype=float)))
 
+def _is_wheel_block(i, j, k):
+    """Tyre block (nominal grid position): sits on the ground plane, so it must
+    not count as the car when grading the ymin slabs."""
+    cx = 0.5 * (xs[i] + xs[i + 1])
+    cy = 0.5 * (ys[j] + ys[j + 1])
+    az = abs(0.5 * (zs[k] + zs[k + 1]))
+    return (((FX0 < cx < FX1) or (RX0 < cx < RX1)) and (WZ_IN < az < WZ_OUT)
+            and cy < WY_TOP)
+
+def _slab_live_cols(a, s, cols, oa, ob):
+    """Columns (p, q) that have at least one LIVE block in slab s of axis a."""
+    out = []
+    NN = (nx, ny, nz)
+    for p, q in cols:
+        live = False
+        for bp in (p - 1, p):
+            for bq in (q - 1, q):
+                if not (0 <= bp < NN[oa] and 0 <= bq < NN[ob]):
+                    continue
+                ijk = [0, 0, 0]
+                ijk[a], ijk[oa], ijk[ob] = s, bp, bq
+                if not solid[ijk[0], ijk[1], ijk[2]]:
+                    live = True
+        out.append(live)
+    return out
+
 _GRADE = {}        # (axis, slab) -> simpleGrading ratio of that outer slab
 _G_ROWS = []
 _G_REPORT = None
@@ -1327,6 +1374,14 @@ else:
         _ln, _na = _LINES[_a], _NN[_a]
         _lo = int(_sol_idx[:, _a].min())
         _hi = int(_sol_idx[:, _a].max())
+        if _a == 1:
+            # The tyres touch the ground plane (ymin), which would make the lowest
+            # solid slab j=0 and leave no slab to grade below the car. Reference the
+            # lowest BODY block instead, so ymin is graded like every other outer side.
+            _body_j = [int(t[1]) for t in _sol_idx
+                       if not _is_wheel_block(int(t[0]), int(t[1]), int(t[2]))]
+            if _body_j:
+                _lo = min(_body_j)
         _oa, _ob = [m for m in range(3) if m != _a]
         _cols = [(p, q) for p in range(_NN[_oa] + 1) for q in range(_NN[_ob] + 1)]
         for _side in ("high", "low"):
@@ -1343,7 +1398,9 @@ else:
             for _s in _order:
                 _n, _old_g = _ln[_s + 1][1], _ln[_s + 1][2]
                 _Ls = [_edge_len(_a, _s, p, q) for p, q in _cols]
-                _pairs = [(L, d) for L, d in zip(_Ls, _dcol) if L > 1e-9 and d > 1e-12]
+                _livec = _slab_live_cols(_a, _s, _cols, _oa, _ob)   # skip columns under dead (tyre) blocks
+                _pairs = [(L, d) for L, d, lv in zip(_Ls, _dcol, _livec)
+                          if lv and L > 1e-9 and d > 1e-12]
                 _note, _t, _g = "", 1.0, 1.0
                 if _n < 2:
                     _note = "single cell"
@@ -1357,10 +1414,10 @@ else:
                         _g = min(max(_g, 0.01), 100.0)
                         _note = "grading clamped to 100"
                 _ratio, _newd = [], []
-                for L, d in zip(_Ls, _dcol):
+                for L, d, lv in zip(_Ls, _dcol, _livec):
                     f1, l1 = _slab_cell_sizes(L, _n, _g)
                     near, far = (f1, l1) if _high else (l1, f1)
-                    if d > 1e-12 and near > 0:
+                    if lv and d > 1e-12 and near > 0:
                         _ratio.append(near / d)
                     _newd.append(far)
                 _dcol = _newd
@@ -1655,6 +1712,8 @@ def _r6(p):
     return tuple(float("%.6g" % c) for c in p)
 _clean = []
 for a, b, pts in edges_out:
+    if a in _ymin_v and b in _ymin_v:   # edge lies in the ymin plane: keep it flat
+        pts = [np.array([q[0], float(ys[0]), q[2]]) for q in pts]
     pa = _r6(snapped[a])
     pb = _r6(snapped[b])
     seq = [pa] + [_r6(q) for q in pts] + [pb]
