@@ -964,6 +964,18 @@ function _bili(Q,s,t){
   const a1=[Q[3][0]+(Q[2][0]-Q[3][0])*s, Q[3][1]+(Q[2][1]-Q[3][1])*s, Q[3][2]+(Q[2][2]-Q[3][2])*s];
   return [a0[0]+(a1[0]-a0[0])*t, a0[1]+(a1[1]-a0[1])*t, a0[2]+(a1[2]-a0[2])*t];
 }
+/* Cell-boundary positions (0..1) along a block edge of n cells with simpleGrading
+   g (= last/first cell): the same geometric spacing blockMesh uses. rev flips the
+   direction when the face edge runs against the block axis. */
+function _gpos(n,g,rev){
+  const P=[];
+  if(n<=1||!(g>0)||Math.abs(g-1)<1e-9){ for(let i=0;i<=n;i++) P.push(i/n); }
+  else{
+    const t=Math.pow(g,1/(n-1)), den=Math.pow(t,n)-1;
+    for(let i=0;i<=n;i++) P.push((Math.pow(t,i)-1)/den);
+  }
+  return rev ? P.map((_,i)=>1-P[n-i]) : P;
+}
 async function refreshProjectedMesh(){
   if(meshBusy){ meshPending=true; return; }       // run once more when this one ends
   meshBusy=true;
@@ -1000,12 +1012,16 @@ async function _buildProjectedMesh(){
         const qq=E.map(e=>dv[e[0]+(NX+1)*(e[1]+(NY+1)*e[2])]);
         if(qq.every(q=>q)) Q=qq;
       }
-      const nu=Math.max(1,nc[edgeAxis(E[0],E[1])]||1);
-      const nv=Math.max(1,nc[edgeAxis(E[1],E[2])]||1);
+      const au=edgeAxis(E[0],E[1]), av=edgeAxis(E[1],E[2]);
+      const nu=Math.max(1,nc[au]||1);
+      const nv=Math.max(1,nc[av]||1);
+      const gg=(b&&b.g)?b.g:[1,1,1];       // real per-slab simpleGrading of the neighbouring blocks
+      const Su=_gpos(nu,gg[au],E[1][au]<E[0][au]);
+      const Sv=_gpos(nv,gg[av],E[2][av]<E[1][av]);
       const grid=[];
       for(let a=0;a<=nu;a++){
         const row=[];
-        for(let c=0;c<=nv;c++) row.push(add(_bili(Q,a/nu,c/nv)));
+        for(let c=0;c<=nv;c++) row.push(add(_bili(Q,Su[a],Sv[c])));
         grid.push(row);
       }
       for(let a=0;a<=nu;a++)for(let c=0;c<=nv;c++){

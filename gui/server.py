@@ -361,7 +361,7 @@ def _resolve_lines(vals, axis):
 
 
 def build_interface(xs, ys, zs, solid_ov, fluid_ov, method="raycast", nlines=None,
-                    flat=False):
+                    flat=False, grades=None):
     """Deformed block grid + solid test + overrides -> interface tris.
 
     method="raycast" (default): even/odd closest... parity of STL ray
@@ -495,7 +495,10 @@ def build_interface(xs, ys, zs, solid_ov, fluid_ov, method="raycast", nlines=Non
                                  (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]],
                         "nc": [int(nlines["x"][i]) if nlines else 0,
                                int(nlines["y"][j]) if nlines else 0,
-                               int(nlines["z"][k]) if nlines else 0]} for k in range(nz)
+                               int(nlines["z"][k]) if nlines else 0],
+                        "g": [float(grades["x"][i]) if grades else 1.0,
+                              float(grades["y"][j]) if grades else 1.0,
+                              float(grades["z"][k]) if grades else 1.0]} for k in range(nz)
                        for j in range(ny) for i in range(nx)],
             "counts": {"solid": int(solid.sum()),
                        "fluid": int((~solid).sum()),
@@ -513,6 +516,77 @@ def build_interface(xs, ys, zs, solid_ov, fluid_ov, method="raycast", nlines=Non
 # make_car_blockMeshDict.py (from the actual draped slab lengths). The generator
 # writes system/grading_report.json on every run; the server just reports it.
 # ---------------------------------------------------------------------------
+def _dict_gradings(xs, ys, zs):
+    """{axis: {slab: simpleGrading}} read from the CURRENT blockMeshDict (macros
+    like $gymin resolved), or None when the dict was built from another grid."""
+    d = _dict_grid()
+    if d is None or not (_same(d["x"], xs) and _same(d["y"], ys) and _same(d["z"], zs)):
+        return None
+    try:
+        txt = open(os.path.join(SYS, "blockMeshDict")).read()
+    except OSError:
+        return None
+    macros = {m.group(1): float(m.group(2)) for m in re.finditer(
+        r"(?m)^g(xmin|xmax|ymin|ymax|zmin|zmax)\s+([-+.\deE]+);", txt)}
+    nx, ny = len(xs) - 1, len(ys) - 1
+    out = {"x": {}, "y": {}, "z": {}}
+    for m in re.finditer(r"hex\s*\(([^()]+)\)\s*\(\s*\d+\s+\d+\s+\d+\s*\)\s*"
+                         r"simpleGrading\s*\(([^()]+)\)", txt):
+        try:
+            v0 = int(m.group(1).split()[0])
+        except (ValueError, IndexError):
+            continue
+        ijk = (v0 % (nx + 1), (v0 // (nx + 1)) % (ny + 1), v0 // ((nx + 1) * (ny + 1)))
+        toks = m.group(2).split()
+        if len(toks) != 3:
+            continue
+        for a, t in enumerate(toks):
+            try:
+                val = macros.get(t[1:]) if t.startswith("$") else float(t)
+            except ValueError:
+                val = None
+            if val is not None:
+                out["xyz"[a]][ijk[a]] = float(val)
+    return out
+
+
+def _effective_gradings(xs, ys, zs):
+    """Per-slab simpleGrading the mesh really gets, per axis: line grading, then the
+    generator's outer-slab report, then GUI overrides; the written blockMeshDict
+    (exact) wins whenever it matches this grid."""
+    out = {}
+    try:
+        sd = json.load(open(os.path.join(SYS, "splits.json")))
+    except (OSError, ValueError):
+        sd = {}
+    go = sd.get("grade_overrides") if isinstance(sd.get("grade_overrides"), dict) else {}
+    rows = (_grading_report() or {}).get("rows") or []
+    for ax, vals in (("x", xs), ("y", ys), ("z", zs)):
+        g = [float(e[2]) for e in _resolve_lines(vals, ax)[1:]]
+        for r in rows:
+            try:
+                s = int(r["slab"])
+                if (r["axis"] == ax and 0 <= s < len(g)
+                        and abs(float(r["c0"]) - vals[s]) < 1e-6
+                        and abs(float(r["c1"]) - vals[s + 1]) < 1e-6):
+                    g[s] = float(r["new_g"])
+            except (KeyError, TypeError, ValueError):
+                pass
+        out[ax] = g
+    for k, v in go.items():
+        try:
+            out[k[0]][0 if k.endswith("min") else -1] = float(v)
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+    dg = _dict_gradings(xs, ys, zs)
+    if dg:
+        for ax in "xyz":
+            for s, v in dg[ax].items():
+                if 0 <= s < len(out[ax]):
+                    out[ax][s] = v
+    return out
+
+
 def _grading_report():
     """What the generator's outer-slab grading did on its last run, or None."""
     try:
@@ -2949,7 +3023,8 @@ class H(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     _flat = False
                 return self._json(build_interface(xs, ys, zs, solid_ov,
-                                                  fluid_ov, method, _nl, _flat))
+                                                  fluid_ov, method, _nl, _flat,
+                                                  _effective_gradings(xs, ys, zs)))
             except Exception as e:
                 return self._json({"error": f"interface failed: {e}"}, 500)
         return self._json({"error": "not found"}, 404)
