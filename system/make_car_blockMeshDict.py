@@ -27,7 +27,24 @@ import sys
 import os
 import numpy as np
 
-CASE = os.environ.get("BLOCKMESH_CASE", "/home/garcfd/working/blockMesh-car")
+def _find_case():
+    """Case directory, never a hard-coded absolute path:
+    1. $BLOCKMESH_CASE if set
+    2. "." when the current directory has a system/ folder  (-> ./system/blockMeshDict)
+    3. the parent of the folder this script lives in (the script sits in <case>/system/)"""
+    env = os.environ.get("BLOCKMESH_CASE")
+    if env:
+        return env
+    if os.path.isdir(os.path.join(".", "system")):
+        return "."
+    here = os.path.dirname(os.path.abspath(__file__))
+    parent = os.path.dirname(here)
+    if os.path.isdir(os.path.join(parent, "system")):
+        return parent
+    return "."
+
+
+CASE = _find_case()
 
 
 def geometry_stl(case):
@@ -345,6 +362,15 @@ _PINS = {}
 # vertex to its closest STL point regardless of distance, and skips all
 # revert guards + edge auto-drop. Fit wins, checkMesh may fail.
 _SNAP_ALL = False
+# Exact pins (default): a hand-placed / optimiser-placed vertex keeps the position it was
+# given. Without this the generator re-projected every pin onto the SDF (and the body-wall
+# pass projected it again), undoing orthogonality fixes made against the STL / smooth
+# surface. splits.json {"pins_exact": false} restores the old re-projection.
+_PINS_EXACT = True
+# z-symmetry mode (splits.json {"symmetry": "zplus" | "average"}):
+#   zplus   - map the +z side onto -z (vertices and edges)
+#   average - mean of the two sides (|z| averaged, x/y averaged, edge points averaged)
+_SYM_MODE = "zplus"
 # Flat mode: splits.json {"flat": true} disables terrain-following (planes stay
 # flat so every block in a row shares ymin/ymax etc). Snapping still applies.
 _FLAT = False
@@ -377,6 +403,10 @@ try:
                                   if isinstance(t, (list, tuple)) and len(t) == 3]
         print(f"using splits.json override: {len(x_lines)-1}x{len(y_lines)-1}x{len(z_lines)-1} intervals", file=sys.stderr)
         _SNAP_ALL = bool(_d.get("snap_all", False))
+        _PINS_EXACT = bool(_d.get("pins_exact", True))
+        _SYM_MODE = str(_d.get("symmetry", "zplus")).lower()
+        if _SYM_MODE not in ("zplus", "average"):
+            _SYM_MODE = "zplus"
         if _SNAP_ALL:
             print("SNAP_ALL: fit-first, guards off", file=sys.stderr)
         _FLAT = bool(_d.get("flat", False))
@@ -836,9 +866,13 @@ for k in range(nz + 1):
                 a, b = b, a
             pb = np.asarray(snapped[b], dtype=float)
             x, y, az = float(pb[0]), float(pb[1]), abs(float(pb[2]))
+            if _SYM_MODE == "average":
+                pa_ = np.asarray(snapped[a], dtype=float)
+                x, y = 0.5 * (float(pa_[0]) + x), 0.5 * (float(pa_[1]) + y)
+                az = 0.5 * (abs(float(pa_[2])) + az)
             snapped[a] = (x, y, -az)
             snapped[b] = (x, y, az)
-print("symmetry enforced", file=sys.stderr)
+print(f"symmetry enforced (mode: {_SYM_MODE})", file=sys.stderr)
 
 # ------------------------------------------------- frozen vertices
 # Surgical reverts for mesh-level skew faces traced back to dict blocks
@@ -1091,9 +1125,10 @@ if _pin_rev:
 # SDF used by projected edges. Raw pins can sit several cm off the STL and
 # leave a discontinuity where an SDF polyLine meets its endpoint.
 _PIN_N = _PIN_PROJECTED = _PIN_REJECTED = 0
+_pin_placed = set()      # pins accepted at their requested position
 for _v, _pp in _PINS.items():
     _raw = np.asarray(_pp, dtype=float)
-    _target = np.asarray(SDF.project(_raw), dtype=float)
+    _target = _raw.copy() if _PINS_EXACT else np.asarray(SDF.project(_raw), dtype=float)
     _save = snapped[_v].copy()
     _accepted = False
     for _alpha in (1.0, 0.75, 0.5, 0.25):
@@ -1108,6 +1143,7 @@ for _v, _pp in _PINS.items():
         if _valid:
             _accepted = True
             _PIN_N += 1
+            _pin_placed.add(_v)
             _PIN_PROJECTED += 1 if _alpha == 1.0 else 0
             break
     if not _accepted:
@@ -1128,8 +1164,8 @@ except (OSError, ValueError, TypeError):
 _wall_vertices = sorted({int(v) for _face in patches["body"] for v in _face})
 _wall_moved = _wall_rejected = 0
 for _v in _wall_vertices:
-    if _v in _frozen_vertices:
-        continue
+    if _v in _frozen_vertices or (_PINS_EXACT and _v in _pin_placed):
+        continue   # frozen, or an exact pin: do not move it again
     _start = snapped[_v].copy()
     _target = np.asarray(SDF.project(_start), dtype=float)
     if np.linalg.norm(_target - _start) <= 0.001:
@@ -1223,6 +1259,22 @@ _orthogonalize_outer_boundaries()
 print("outer boundaries orthogonalized (top, sides, inlet, outlet)", file=sys.stderr)
 _n_ymin = _enforce_ymin()
 print(f"ymin plane lock: {_n_ymin} vertices put back on y={ys[0]}", file=sys.stderr)
+# Symmetry audit: pins and the one-sided optimiser break exact z-symmetry on purpose;
+# report how many mirror pairs differ and how many of those involve a pinned vertex.
+_asym = _asym_pin = 0
+for _k in range(nz + 1):
+    _kk = nz - _k
+    if _kk <= _k:
+        continue
+    for _j in range(ny + 1):
+        for _i in range(nx + 1):
+            _a, _b = vid(_i, _j, _k), vid(_i, _j, _kk)
+            _pa, _pb = snapped[_a], snapped[_b]
+            if max(abs(_pa[0] - _pb[0]), abs(_pa[1] - _pb[1]), abs(_pa[2] + _pb[2])) > 1e-6:
+                _asym += 1
+                if _a in _PINS or _b in _PINS:
+                    _asym_pin += 1
+print(f"symmetry audit: {_asym} mirror pairs differ (>1e-6), {_asym_pin} of them involve a pinned vertex", file=sys.stderr)
 
 # ------------------------------------------------- outer block grading calculation
 # SINGLE SOURCE OF TRUTH for the grading of the outer (live) slabs. server.py and
@@ -1592,47 +1644,53 @@ for (a, b, pts) in edges_out:
         continue
     ia, ja, ka = vijk[a]; ib, jb, kb = vijk[b]
     if key2 == (min(a, b), max(a, b)):
-        # self-mirrored centre-crossing z-edge: average across the centre
+        # self-mirrored centre-crossing z-edge
         n = len(pts)
         P = [np.asarray(p, dtype=float) for p in pts]
         Q = []
-        for s in range(n):
-            q1, q2 = P[s], P[n - 1 - s]
-            x = 0.5 * (q1[0] + q2[0]); y = 0.5 * (q1[1] + q2[1])
-            if s == n - 1 - s:
-                Q.append(np.array([x, y, 0.0]))
-            elif s < n - 1 - s:
-                az = 0.5 * (abs(q1[2]) + abs(q2[2]))
-                Q.append(np.array([x, y, -az]))
-            else:
-                az = 0.5 * (abs(P[n - 1 - s][2]) + abs(P[s][2]))
-                Q.append(np.array([Q[n - 1 - s][0], Q[n - 1 - s][1],
-                                   abs(Q[n - 1 - s][2])]))
+        if _SYM_MODE == "average":
+            # average the two halves across the centre
+            for s in range(n):
+                q1, q2 = P[s], P[n - 1 - s]
+                x = 0.5 * (q1[0] + q2[0]); y = 0.5 * (q1[1] + q2[1])
+                if s == n - 1 - s:
+                    Q.append(np.array([x, y, 0.0]))
+                elif s < n - 1 - s:
+                    az = 0.5 * (abs(q1[2]) + abs(q2[2]))
+                    Q.append(np.array([x, y, -az]))
+                else:
+                    az = 0.5 * (abs(P[n - 1 - s][2]) + abs(P[s][2]))
+                    Q.append(np.array([Q[n - 1 - s][0], Q[n - 1 - s][1],
+                                       abs(Q[n - 1 - s][2])]))
+        else:
+            # zplus: keep the +z half of the curve, mirror it onto the -z half
+            pos_first = float(V[a][2]) > float(V[b][2])     # a is the +z end -> first half is +z
+            for s in range(n):
+                m_ = n - 1 - s
+                first_half = s < m_
+                if s == m_:
+                    Q.append(np.array([P[s][0], P[s][1], 0.0]))
+                elif first_half == pos_first:
+                    Q.append(P[s].copy())
+                else:
+                    Q.append(_mirror_point(P[m_]))
         _sym.append((a, b, Q))
         _done.add((a, b))
-    elif ka == kb:
-        # x- or y-edge: same direction sense on both sides, copy +z -> -z
-        if float(V[a][2] + V[b][2]) >= 0:
-            keep_pts = [np.asarray(p, dtype=float) for p in pts]
-            _sym.append((a, b, keep_pts))
-            _sym.append((a2, b2, [_mirror_point(p) for p in keep_pts]))
-        else:
-            keep_pts = [np.asarray(p, dtype=float) for p in pts2]
-            _sym.append((a2, b2, keep_pts))
-            _sym.append((a, b, [_mirror_point(p) for p in keep_pts]))
-        _done.add((a, b))
-        _done.add((a2, b2))
-        _done.add((b2, a2))
     else:
-        # z-edge pair: mirror flips direction, copy reversed +z -> -z
-        if float(V[a][2] + V[b][2]) >= 0:
-            keep_pts = [np.asarray(p, dtype=float) for p in pts]
-            _sym.append((a, b, keep_pts))
-            _sym.append((a2, b2, [_mirror_point(p) for p in keep_pts[::-1]]))
+        # mirrored pair of edges: the +z side is the master
+        _a_pos = float(V[a][2] + V[b][2]) >= 0
+        (pa_, pb_, pp_), (na_, nb_, np_) = (((a, b, pts), (a2, b2, pts2)) if _a_pos
+                                            else ((a2, b2, pts2), (a, b, pts)))
+        # x-/y-edges keep their direction on the mirror side; z-edges reverse it
+        np_cmp = np_ if ka == kb else list(np_)[::-1]
+        if _SYM_MODE == "average" and len(pp_) == len(np_cmp):
+            keep_pts = [0.5 * (np.asarray(p, dtype=float) + _mirror_point(q))
+                        for p, q in zip(pp_, np_cmp)]
         else:
-            keep_pts = [np.asarray(p, dtype=float) for p in pts2]
-            _sym.append((a2, b2, keep_pts))
-            _sym.append((a, b, [_mirror_point(p) for p in keep_pts[::-1]]))
+            keep_pts = [np.asarray(p, dtype=float) for p in pp_]
+        _sym.append((pa_, pb_, keep_pts))
+        _mir = [_mirror_point(p) for p in keep_pts]
+        _sym.append((na_, nb_, _mir if ka == kb else _mir[::-1]))
         _done.add((a, b))
         _done.add((a2, b2))
         _done.add((b2, a2))
@@ -1675,6 +1733,7 @@ def _is_roof_z_edge(item):
                        and max(pa[1], pb[1]) > -0.15
                        and -2.4 < xs[ia] < 2.4)
     return z_edge or y_shoulder_edge
+_pre_edges = list(edges_out)
 scores = np.array([_edge_score(e) for e in edges_out])
 if _SNAP_ALL:
     print(f"SNAP_ALL: keeping all {len(edges_out)} curved edges", file=sys.stderr)
@@ -1682,7 +1741,28 @@ if _SNAP_ALL:
 elif len(scores):
     # Gentle majority only: steep subdivided curves are what skew/fold.
     _EDGE_PCT = float(os.environ.get("EDGE_PCT", "92"))
-    thresh = float(np.percentile(scores, _EDGE_PCT)) if len(scores) else 0.0
+    # The cut-off is FROZEN (system/edge_thresh.json) instead of being re-derived as a
+    # percentile of this run's edges: a percentile moves whenever ANY edge changes
+    # (e.g. at the wheels), which flipped unrelated edges between curved and straight.
+    # EDGE_RECALIBRATE=1 recomputes + stores it; EDGE_THRESH=<x> overrides it.
+    _thr_path = os.path.join(CASE, "system", "edge_thresh.json")
+    thresh = None
+    if os.environ.get("EDGE_THRESH"):
+        thresh = float(os.environ["EDGE_THRESH"])
+    elif os.environ.get("EDGE_RECALIBRATE", "0") == "0":
+        try:
+            thresh = float(json.load(open(_thr_path))["thresh"])
+            print(f"edge deviation threshold frozen at {thresh:.3f} ({_thr_path})", file=sys.stderr)
+        except (OSError, ValueError, KeyError, TypeError):
+            thresh = None
+    if thresh is None:
+        thresh = float(np.percentile(scores, _EDGE_PCT)) if len(scores) else 0.0
+        try:
+            with open(_thr_path, "w") as _tf:
+                json.dump({"thresh": thresh, "pct": _EDGE_PCT}, _tf)
+            print(f"edge deviation threshold p{_EDGE_PCT:.0f}={thresh:.3f} stored in {_thr_path}", file=sys.stderr)
+        except OSError:
+            pass
     keep = []
     n_forced = 0
     for e, s in zip(edges_out, scores):
@@ -1729,6 +1809,18 @@ for a, b, pts in edges_out:
 print(f"curved edges after degenerate filter: {len(_clean)}/{len(edges_out)}",
       file=sys.stderr)
 edges_out = _clean
+# Edges left STRAIGHT on purpose (filtered as too deviant, forced straight on twisted
+# blocks, or degenerate): recorded so the GUI server does not re-curve them after Write.
+try:
+    _kept_keys = {(min(a, b), max(a, b)) for a, b, _p in edges_out}
+    _straight_keys = sorted({(min(a, b), max(a, b)) for a, b, _p in _pre_edges} - _kept_keys)
+    with open(os.path.join(CASE, "system", "straight_edges.json"), "w") as _sf:
+        json.dump({"grid": {"x": [float(v) for v in xs], "y": [float(v) for v in ys],
+                            "z": [float(v) for v in zs]},
+                   "edges": [list(k) for k in _straight_keys]}, _sf)
+    print(f"edges left straight on purpose: {len(_straight_keys)}", file=sys.stderr)
+except (OSError, TypeError, ValueError) as _e:
+    print(f"straight_edges.json not written ({_e})", file=sys.stderr)
 
 # Validate the actual piecewise-linear blockMesh edge geometry against the STL.
 # Sample inside every segment, not only at polyLine controls (controls can be
