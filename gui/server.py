@@ -714,11 +714,25 @@ def load_stl(path=None):
     return _stl_cache["t"]
 
 
+def _save_gen_log(log):
+    """Keep the generator's FULL output: system/generator.log (this run) and
+    system/generator.prev.log (the run before), so two runs can be diffed."""
+    try:
+        cur = os.path.join(SYS, "generator.log")
+        if os.path.exists(cur):
+            os.replace(cur, os.path.join(SYS, "generator.prev.log"))
+        with open(cur, "w") as f:
+            f.write(log)
+    except OSError:
+        pass
+
+
 def run(cmd, timeout=600):
     # Serialize generator/build commands so no generator reads the SDF while
     # the Distance Field button is replacing it.
     with _lock:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # cwd = case directory, so the generator finds ./system/... with relative paths
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=CASE)
     return r.returncode, (r.stdout or "") + "\n" + (r.stderr or "")
 
 
@@ -1875,8 +1889,48 @@ def _write_edge_curves(curves):
     except (OSError, ValueError):
         cur = {}
     cur["normal_edges"] = sorted([list(k) for k in (mine | want)])
+    _g = _dict_grid()
+    if _g:
+        cur["normal_edges_grid"] = _g
     with open(sp, "w") as f:
         json.dump(cur, f)
+
+
+def _reapply_normal_edges():
+    """Write regenerates the edges section, which drops the optimiser's normal-leaving
+    curves. Re-derive them from the CURRENT vertices for the edges remembered in
+    splits.json (only when they were made for this very grid)."""
+    import numpy as np
+    mine = _normal_edge_set()
+    if not mine:
+        return {"ok": True, "n": 0}
+    try:
+        cur = json.load(open(os.path.join(SYS, "splits.json")))
+        g, sg = _dict_grid(), cur.get("normal_edges_grid") or {}
+        if g is None or not all(_same(g[a], sg.get(a)) for a in "xyz"):
+            return {"ok": True, "n": 0, "skipped": "grid changed since the normal edges were made"}
+        verts, _q, nbr = _read_dict_surface()
+        surf = set(nbr)
+        pairs = []
+        for a, b in sorted(mine):
+            if a in surf and b not in surf:
+                pairs.append((a, b))
+            elif b in surf and a not in surf:
+                pairs.append((b, a))
+        if not pairs:
+            return {"ok": True, "n": 0}
+        target = "smooth" if os.path.exists(os.path.join(SYS, "car_sdf_surface.npz")) else "stl"
+        nrm = _surface_normals(verts[[v for v, _w in pairs]], target)
+        curves = {}
+        for (v, w), n in zip(pairs, nrm):
+            pts = _normal_curve(verts[v], verts[w], n)
+            if pts is not None:
+                curves[(v, w)] = pts
+        if curves:
+            _write_edge_curves(curves)
+        return {"ok": True, "n": len(curves)}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
 
 
 def _normal_curve(p0, p1, n, k=6):
@@ -1922,7 +1976,50 @@ def _project_for_edges(P):
     return snap_points(P, target)[0]
 
 
-def _refresh_interface_edges(changed=None, missing_only=False):
+def _unprojected_edges(verts, fidx, curves, curve_ids, tol=5e-4):
+    """Wall edges (edges of body/wheels faces) that do NOT lie on the zero distance-field
+    surface: a polyLine edge is checked at its points, a straight edge along its chord.
+    An edge is unprojected when any sample is more than tol (0.5 mm) off the surface."""
+    import numpy as np
+    wall = set()
+    for q in fidx:
+        for a, b in zip(q, q[1:] + q[:1]):
+            if a != b:
+                wall.add((min(a, b), max(a, b)))
+    poly = {(min(i[0], i[1]), max(i[0], i[1])): p for i, p in zip(curve_ids, curves)}
+    samples, owner = [], []
+    for e in sorted(wall):
+        if e in poly:
+            pts = np.asarray(poly[e], dtype=float)
+        else:
+            pa, pb = np.asarray(verts[e[0]], dtype=float), np.asarray(verts[e[1]], dtype=float)
+            pts = pa + (pb - pa) * np.linspace(0.0, 1.0, 7)[:, None]
+        samples.append(pts)
+        owner.extend([e] * len(pts))
+    if not samples:
+        return []
+    P = np.vstack(samples)
+    d = np.linalg.norm(P - _project_for_edges(P), axis=1)
+    bad = {e for e, di in zip(owner, d) if di > tol}
+    return sorted([int(a), int(b)] for a, b in bad)
+
+
+def _straight_edge_set():
+    """Edges the generator deliberately left straight (system/straight_edges.json),
+    valid only for the grid the current blockMeshDict was built from."""
+    try:
+        with open(os.path.join(SYS, "straight_edges.json")) as f:
+            d = json.load(f)
+        g = _dict_grid()
+        gg = d.get("grid") or {}
+        if g is None or not all(_same(g[a], gg.get(a)) for a in "xyz"):
+            return set()
+        return {(min(int(a), int(b)), max(int(a), int(b))) for a, b in d.get("edges", [])}
+    except (OSError, ValueError, TypeError, KeyError):
+        return set()
+
+
+def _refresh_interface_edges(changed=None, missing_only=False, include_straight=False):
     """Make EVERY interface edge (edge of a body/wheels wall quad) a polyLine whose
     points lie on the car surface, so no interface edge is left straight.
 
@@ -1948,10 +2045,11 @@ def _refresh_interface_edges(changed=None, missing_only=False):
         span_of = {k: (s0, e0) for k, s0, e0 in spans}
         other = pairs - set(span_of)              # arc/spline etc.: leave alone
         mine = _normal_edge_set()                 # optimiser's off-surface curves
+        straight = set() if include_straight else _straight_edge_set()
         chg = None if changed is None else set(int(v) for v in changed)
         todo = []
         for e in sorted(wall):
-            if e in other or e in mine:
+            if e in other or e in mine or e in straight:
                 continue
             if chg is not None and e[0] not in chg and e[1] not in chg:
                 continue
@@ -2448,6 +2546,12 @@ class H(BaseHTTPRequestHandler):
                    "fidx": fidx, "x": gxs, "y": gys, "z": gzs,
                    "nx": len(gxs) - 1, "ny": len(gys) - 1, "nz": len(gzs) - 1,
                    "drift": drift, "n_straight": n_straight}
+            if parse_qs(u.query).get("check", ["0"])[0] == "1" and not drift:
+                try:
+                    out["unprojected"] = _unprojected_edges(verts, fidx, curves, curve_ids)
+                except Exception as _e:
+                    out["unprojected"] = None
+                    out["unprojected_error"] = repr(_e)
             if drift:
                 out["drift_msg"] = ("dict grid %dx%dx%d != splits.json — "
                                     "regenerate (Export) to resync"
@@ -2661,6 +2765,14 @@ class H(BaseHTTPRequestHandler):
                 payload["flat"] = _old["flat"]
             if "flat" in data:
                 payload["flat"] = data["flat"]
+            if "symmetry" in _old:
+                payload["symmetry"] = _old["symmetry"]
+            if "symmetry" in data:
+                payload["symmetry"] = data["symmetry"]
+            if "pins_exact" in _old:
+                payload["pins_exact"] = _old["pins_exact"]
+            if "pins_exact" in data:
+                payload["pins_exact"] = data["pins_exact"]
             # Grading overrides: per-region outermost-slab grading factors.
             _go = None
             if isinstance(data.get("grade_overrides"), dict):
@@ -2686,12 +2798,14 @@ class H(BaseHTTPRequestHandler):
             with open(os.path.join(SYS, "splits.json"), "w") as f:
                 json.dump(payload, f)
             code, log = run([sys.executable, GENERATOR], timeout=600)
+            _save_gen_log(log)
             tail = "\n".join(log.strip().splitlines()[-14:])
             if code != 0:
                 return self._json({"ok": False, "log": tail})
             out = {"ok": True, "log": tail, "grading": _grading_report()}
             # whatever the generator left straight on the interface is curved now
             out["interface_edges"] = _refresh_interface_edges(None, missing_only=True)
+            out["normal_edges"] = _reapply_normal_edges()
             if data.get("runMesh"):
                 _, mlog = run(["bash", "-lc",
                                "source /opt/openfoam12/etc/bashrc; "
@@ -2792,7 +2906,12 @@ class H(BaseHTTPRequestHandler):
             except (OSError, ValueError) as e:
                 return self._json({"error": f"write failed: {e}"}, 500)
             _chg = {i for i, (a_, b_) in enumerate(zip(_old_v, vlines)) if a_ != b_}
-            _ie = _refresh_interface_edges(_chg) if _chg else {"ok": True, "written": 0}
+            if data.get("project_all"):
+                # Update projection: EVERY wall edge is put on the zero distance-field
+                # surface, including edges the generator had left straight.
+                _ie = _refresh_interface_edges(None, False, True)
+            else:
+                _ie = _refresh_interface_edges(_chg) if _chg else {"ok": True, "written": 0}
             return self._json({"ok": True, "patched": _n, "vetoed": _vetoed,
                                "interface_edges": _ie})
         if u.path == "/api/saveover":
@@ -2931,7 +3050,8 @@ class H(BaseHTTPRequestHandler):
             # {missing_only: bool=true}: make every interface edge a projected polyLine
             _backup_dict()
             return self._json(_refresh_interface_edges(
-                None, missing_only=bool(data.get("missing_only", True))))
+                None, missing_only=bool(data.get("missing_only", True)),
+            include_straight=bool(data.get("include_straight", False))))
         if u.path == "/api/snap":
             # Nearest point on a surface: target "stl" (car STL) or "smooth"
             # (smooth distance-field mesh). {points:[[x,y,z],...], target}
@@ -2992,6 +3112,7 @@ class H(BaseHTTPRequestHandler):
             with open(_p, "w") as f:
                 json.dump(cur, f)
             code, log = run([sys.executable, GENERATOR], timeout=600)
+            _save_gen_log(log)
             tail = "\n".join(log.strip().splitlines()[-14:])
             if code != 0:
                 return self._json({"ok": False, "log": tail})
